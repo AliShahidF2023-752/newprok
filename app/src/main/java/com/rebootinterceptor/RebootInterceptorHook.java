@@ -9,23 +9,22 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * RebootInterceptorHook v6
+ * RebootInterceptorHook v7
  *
- * Hooks ShutdownThread.reboot() — the EARLIEST entry point called when the
- * user taps Restart in the power menu. This fires BEFORE any shutdown
- * broadcast, shutdown animation, modem teardown, or 10-second waits.
+ * Root cause of stuck boot logo (previous version):
+ *   - Hook was intercepting reason=null/empty (internal watchdog/OTA reboots)
+ *     and triggering "stop && start" during boot → stuck on logo forever.
  *
- * On intercept: immediately execs /system/bin/reboot and suppresses
- * everything else ShutdownThread would have done.
+ * Root cause of reboot not working (previous version):
+ *   - ProcessBuilder("/system/bin/reboot") ran in system_server process context
+ *     where KSU bind-mount is hidden by susfs → hit real binary, not KSU script.
+ *   - Fix: spawn "su -c /system/bin/reboot userrequested" so command runs in
+ *     a fresh root shell where KSU mounts ARE visible.
  *
- * Trace-confirmed flow:
- *   ActionsDialog tap (23:06:02.195)
- *     → IPowerManager.reboot("userrequested")
- *       → PowerManagerService.reboot()
- *         → ShutdownThread.reboot()        ← WE HOOK HERE
- *           → ShutdownThread.run()
- *             → [shutdown broadcast, animation, modem teardown ...]
- *               → rebootOrShutdown()       ← old hook was too late
+ * Strict guard:
+ *   - ONLY intercept reason == "userrequested"  (power menu Restart tap)
+ *   - null / empty                              → internal reboot, pass through
+ *   - recovery / bootloader / fastboot etc.     → pass through
  */
 public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
@@ -46,11 +45,12 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
             // ----------------------------------------------------------------
             // PRIMARY HOOK: ShutdownThread.reboot(Context, String, boolean)
             //
-            // This is the very first method called when a reboot is requested.
-            // Signature (AOSP Android 13):
-            //   public static void reboot(Context context, String reason, boolean confirm)
-            //
-            // We intercept here so ZERO shutdown side-effects run at all.
+            // This is the very first call made when user taps Restart in the
+            // power menu ActionsDialog. Cancelling here means:
+            //   - No shutdown broadcast sent
+            //   - No shutdown animation started
+            //   - No modem/radio teardown
+            //   - No 10-second wait loops
             // ----------------------------------------------------------------
             XposedHelpers.findAndHookMethod(
                     shutdownThread,
@@ -61,65 +61,61 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            String reason  = (String)  param.args[1];
+                            String  reason  = (String)  param.args[1];
                             boolean confirm = (boolean) param.args[2];
 
-                            Log.i(TAG, "ShutdownThread.reboot() reason=" + reason + " confirm=" + confirm);
-                            XposedBridge.log(TAG + ": ShutdownThread.reboot() reason=" + reason + " confirm=" + confirm);
+                            XposedBridge.log(TAG + ": reboot() reason='" + reason
+                                    + "' confirm=" + confirm);
 
-                            // Only intercept plain user-initiated restart.
-                            // Let recovery / bootloader / fastboot / safemode through untouched.
-                            if (reason != null
-                                    && !reason.isEmpty()
-                                    && !reason.equals("userrequested")) {
-                                XposedBridge.log(TAG + ": passing through (reason=" + reason + ")");
+                            // STRICT guard — only intercept explicit power menu restart.
+                            // null or empty = watchdog / OTA / internal → must NOT intercept.
+                            if (!"userrequested".equals(reason)) {
+                                XposedBridge.log(TAG + ": passing through (reason not userrequested)");
                                 return;
                             }
 
-                            // --- INTERCEPT ---
-                            Log.w(TAG, "*** Intercepting reboot (suppressing ShutdownThread) ***");
-                            XposedBridge.log(TAG + ": *** INTERCEPTED — calling /system/bin/reboot directly ***");
+                            XposedBridge.log(TAG + ": *** INTERCEPTED — suppressing ShutdownThread ***");
 
-                            // Cancel ShutdownThread entirely — no broadcast, no animation,
-                            // no modem teardown, no 10-second waits.
+                            // Cancel the entire ShutdownThread — nothing else runs.
                             param.setResult(null);
 
                             new Thread(() -> {
                                 try {
-                                    // Small grace period so the UI thread can return cleanly.
-                                    Thread.sleep(200);
+                                    // Brief grace so UI thread can return cleanly first.
+                                    Thread.sleep(300);
 
-                                    XposedBridge.log(TAG + ": exec /system/bin/reboot");
-                                    exec("/system/bin/reboot");
-
-                                    // Should never reach here — kernel reboots the device.
-                                    XposedBridge.log(TAG + ": /system/bin/reboot returned unexpectedly");
+                                    // Must use "su -c" to spawn a fresh root shell.
+                                    // system_server's own process context has susfs hiding
+                                    // the KSU bind-mount, so calling the binary directly
+                                    // would hit the real reboot, not your KSU script.
+                                    XposedBridge.log(TAG + ": spawning: su -c /system/bin/reboot userrequested");
+                                    execSu("/system/bin/reboot", "userrequested");
 
                                 } catch (Exception e) {
-                                    Log.e(TAG, "exec error: " + e.getMessage());
                                     XposedBridge.log(TAG + ": exec error: " + e.getMessage());
+                                    Log.e(TAG, "exec error: " + e.getMessage());
                                 }
                             }, "RebootInterceptor-Thread").start();
                         }
                     }
             );
 
-            XposedBridge.log(TAG + ": Hook installed on ShutdownThread.reboot()");
+            XposedBridge.log(TAG + ": PRIMARY hook installed on ShutdownThread.reboot()");
 
-        } catch (Throwable t) {
-            // If the primary hook fails (e.g., method signature differs on this ROM),
-            // fall back to the later rebootOrShutdown hook so we still catch it.
-            XposedBridge.log(TAG + ": Primary hook failed (" + t.getMessage() + "), installing fallback on rebootOrShutdown");
-            Log.w(TAG, "Primary hook failed, falling back: " + t.getMessage());
-            hookRebootOrShutdownFallback(classLoader);
+        } catch (Throwable primary) {
+            // ROM has a different ShutdownThread.reboot() signature — fall back.
+            XposedBridge.log(TAG + ": Primary hook failed (" + primary.getMessage()
+                    + ") — installing fallback on rebootOrShutdown");
+            hookFallback(classLoader);
         }
     }
 
-    // --------------------------------------------------------------------
-    // FALLBACK HOOK: rebootOrShutdown — fires later but still works.
+    // -----------------------------------------------------------------------
+    // FALLBACK: rebootOrShutdown(Context, boolean, String)
     // Only reached if the ROM's ShutdownThread.reboot() signature differs.
-    // --------------------------------------------------------------------
-    private void hookRebootOrShutdownFallback(ClassLoader classLoader) {
+    // Fires later (after shutdown broadcast + animation start) but still works.
+    // -----------------------------------------------------------------------
+    private void hookFallback(ClassLoader classLoader) {
         try {
             Class<?> shutdownThread = XposedHelpers.findClass(
                     "com.android.server.power.ShutdownThread", classLoader);
@@ -134,48 +130,61 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                             boolean isReboot = (boolean) param.args[1];
-                            String reason    = (String)  param.args[2];
+                            String  reason   = (String)  param.args[2];
 
-                            Log.i(TAG, "[fallback] rebootOrShutdown: reboot=" + isReboot + " reason=" + reason);
-                            XposedBridge.log(TAG + ": [fallback] rebootOrShutdown: reboot=" + isReboot + " reason=" + reason);
+                            XposedBridge.log(TAG + ": [fallback] rebootOrShutdown()"
+                                    + " isReboot=" + isReboot + " reason='" + reason + "'");
 
-                            if (!isReboot) return; // let power-off through
+                            // Always let power-off through.
+                            if (!isReboot) return;
 
-                            if (reason != null && !reason.isEmpty()
-                                    && !reason.equals("userrequested")) return;
+                            // STRICT: only intercept userrequested.
+                            if (!"userrequested".equals(reason)) {
+                                XposedBridge.log(TAG + ": [fallback] passing through");
+                                return;
+                            }
 
-                            Log.w(TAG, "[fallback] *** Intercepting rebootOrShutdown ***");
                             XposedBridge.log(TAG + ": [fallback] *** INTERCEPTED ***");
-
                             param.setResult(null);
 
                             new Thread(() -> {
                                 try {
-                                    Thread.sleep(200);
-                                    XposedBridge.log(TAG + ": [fallback] exec /system/bin/reboot");
-                                    exec("/system/bin/reboot");
+                                    Thread.sleep(300);
+                                    XposedBridge.log(TAG + ": [fallback] spawning: su -c /system/bin/reboot userrequested");
+                                    execSu("/system/bin/reboot", "userrequested");
                                 } catch (Exception e) {
-                                    Log.e(TAG, "[fallback] exec error: " + e.getMessage());
-                                    XposedBridge.log(TAG + ": [fallback] exec error: " + e.getMessage());
+                                    XposedBridge.log(TAG + ": [fallback] error: " + e.getMessage());
                                 }
                             }, "RebootInterceptor-Fallback").start();
                         }
                     }
             );
 
-            XposedBridge.log(TAG + ": Fallback hook installed on ShutdownThread.rebootOrShutdown");
+            XposedBridge.log(TAG + ": FALLBACK hook installed on ShutdownThread.rebootOrShutdown");
 
         } catch (Throwable t) {
-            Log.e(TAG, "Fallback hook also failed: " + t.getMessage());
             XposedBridge.log(TAG + ": Fallback hook also failed: " + t.getMessage());
+            Log.e(TAG, "Fallback hook also failed: " + t.getMessage());
         }
     }
 
-    private void exec(String... cmd) throws Exception {
-        ProcessBuilder pb = new ProcessBuilder(cmd);
-        pb.redirectErrorStream(true);
-        Process p = pb.start();
-        p.waitFor();
-        Log.i(TAG, "exec [" + String.join(" ", cmd) + "] exit=" + p.exitValue());
+    /**
+     * Spawns "su -c <cmd>" in a new root shell where KSU bind-mounts are
+     * visible. Does NOT call waitFor() — the KSU script runs "stop" which
+     * tears down the process tree anyway, so waitFor() would deadlock.
+     */
+    private void execSu(String... cmd) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        for (String part : cmd) {
+            if (sb.length() > 0) sb.append(' ');
+            sb.append(part);
+        }
+        String fullCmd = sb.toString();
+        XposedBridge.log(TAG + ": su -c \"" + fullCmd + "\"");
+
+        new ProcessBuilder("su", "-c", fullCmd)
+                .redirectErrorStream(true)
+                .start();
+        // No waitFor() — "stop" kills us before the script ever returns.
     }
 }
