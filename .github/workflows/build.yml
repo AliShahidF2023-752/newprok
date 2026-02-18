@@ -25,13 +25,19 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.2'
+
+      - name: Download Gradle wrapper jar
+        run: |
+          mkdir -p gradle/wrapper
+          curl -Lo gradle/wrapper/gradle-wrapper.jar \
+            https://github.com/gradle/gradle/raw/v8.2.0/gradle/wrapper/gradle-wrapper.jar
+
       - name: Grant gradlew execute permission
         run: chmod +x gradlew
-
-      - name: Add Xposed API repository
-        run: |
-          # Ensure the Xposed repo is in settings.gradle (already there, but double-check)
-          cat settings.gradle
 
       - name: Build release APK
         run: ./gradlew assembleRelease --no-daemon --stacktrace
