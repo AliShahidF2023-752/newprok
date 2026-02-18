@@ -9,34 +9,21 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * RebootInterceptorHook
+ * RebootInterceptorHook v3
  *
- * Hooks ShutdownThread inside system_server.
- * When a plain reboot (reason="userrequested") is triggered from the
- * power menu, we cancel the reboot and run `stop && start` instead.
+ * Fix: system_server has no PATH to su. Use full binary paths instead.
+ * system_server already runs as root so no su needed.
  *
- * Hook target:  com.android.server.power.ShutdownThread
- * Method:       rebootOrShutdown(Context, boolean reboot, String reason)
- *
- * This is called right before the kernel reboot() JNI syscall fires,
- * giving us the last clean window to intercept it.
+ * Also kills shutdownanim which was left running and blocking the screen.
  */
 public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
     private static final String TAG = "RebootInterceptor";
 
-    // The reason string we saw in the logcat: "userrequested"
-    // Also intercept null/empty which is a plain `adb reboot`
-    private static final String REASON_USER    = "userrequested";
-    private static final String REASON_ADB     = null; // plain adb reboot
-
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
-        // Only hook system_server
         if (!"android".equals(lpparam.packageName)) return;
-
-        XposedBridge.log(TAG + ": Loaded in system_server, installing hooks...");
-
+        XposedBridge.log(TAG + ": installed in system_server");
         hookShutdownThread(lpparam.classLoader);
     }
 
@@ -45,62 +32,54 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
             Class<?> shutdownThread = XposedHelpers.findClass(
                     "com.android.server.power.ShutdownThread", classLoader);
 
-            // Hook rebootOrShutdown(Context context, boolean reboot, String reason)
-            // This is the final method before the JNI reboot syscall
             XposedHelpers.findAndHookMethod(
                     shutdownThread,
                     "rebootOrShutdown",
                     android.content.Context.class,
-                    boolean.class,   // reboot=true means reboot, false=shutdown
-                    String.class,    // reason
+                    boolean.class,
+                    String.class,
                     new XC_MethodHook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                             boolean isReboot = (boolean) param.args[1];
                             String reason   = (String)  param.args[2];
 
-                            Log.i(TAG, "rebootOrShutdown called: reboot=" + isReboot + " reason=" + reason);
+                            Log.i(TAG, "rebootOrShutdown: reboot=" + isReboot + " reason=" + reason);
                             XposedBridge.log(TAG + ": rebootOrShutdown: reboot=" + isReboot + " reason=" + reason);
 
-                            // Only intercept plain reboots
-                            // Pass through: shutdown, recovery, bootloader, fastboot, etc.
-                            if (!isReboot) {
-                                Log.i(TAG, "Shutdown detected - passing through");
-                                return;
-                            }
-
+                            // Only intercept plain reboots - pass through shutdown/recovery/bootloader
+                            if (!isReboot) return;
                             if (reason != null && !reason.isEmpty()
-                                    && !reason.equals(REASON_USER)) {
-                                Log.i(TAG, "Special reboot reason '" + reason + "' - passing through");
-                                return;
-                            }
+                                    && !reason.equals("userrequested")) return;
 
                             // --- INTERCEPT ---
-                            Log.w(TAG, "*** Intercepting reboot (reason=" + reason + ") -> stop && start ***");
-                            XposedBridge.log(TAG + ": *** INTERCEPTED - running stop && start instead ***");
+                            Log.w(TAG, "*** Intercepting reboot -> stop && start ***");
+                            XposedBridge.log(TAG + ": *** INTERCEPTED ***");
 
-                            // Cancel the real reboot
-                            param.setResult(null);
+                            param.setResult(null); // cancel the real reboot
 
-                            // Run stop && start on a background thread
-                            // (system_server is still alive at this point)
                             new Thread(() -> {
                                 try {
-                                    Log.i(TAG, "Running: stop");
-                                    Runtime.getRuntime().exec(
-                                        new String[]{"su", "-c", "stop"}
-                                    ).waitFor();
+                                    // Kill the shutdown animation that's blocking the screen
+                                    Log.i(TAG, "Killing shutdownanim...");
+                                    exec("/system/bin/stop", "shutdownanim");
+                                    Thread.sleep(500);
 
+                                    // Stop all Android services
+                                    // system_server is already root - no su needed
+                                    Log.i(TAG, "Running: stop");
+                                    exec("/system/bin/stop");
                                     Thread.sleep(2000);
 
+                                    // Restart all Android services
                                     Log.i(TAG, "Running: start");
-                                    Runtime.getRuntime().exec(
-                                        new String[]{"su", "-c", "start"}
-                                    );
+                                    exec("/system/bin/start");
 
-                                    Log.i(TAG, "stop && start completed");
+                                    Log.i(TAG, "stop && start completed successfully");
+                                    XposedBridge.log(TAG + ": stop && start done");
+
                                 } catch (Exception e) {
-                                    Log.e(TAG, "Error running stop/start: " + e.getMessage());
+                                    Log.e(TAG, "Error: " + e.getMessage());
                                     XposedBridge.log(TAG + ": Error: " + e.getMessage());
                                 }
                             }, "RebootInterceptor-Thread").start();
@@ -109,11 +88,18 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
             );
 
             XposedBridge.log(TAG + ": Hook installed on ShutdownThread.rebootOrShutdown");
-            Log.i(TAG, "Hook installed successfully");
 
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Failed to hook ShutdownThread: " + t.getMessage());
+            XposedBridge.log(TAG + ": Hook failed: " + t.getMessage());
             Log.e(TAG, "Hook failed: " + t.getMessage());
         }
+    }
+
+    private void exec(String... cmd) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        p.waitFor();
+        Log.i(TAG, "exec " + String.join(" ", cmd) + " -> exit " + p.exitValue());
     }
 }
