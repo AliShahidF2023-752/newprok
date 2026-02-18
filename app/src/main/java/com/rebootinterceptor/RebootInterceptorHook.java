@@ -9,13 +9,10 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * RebootInterceptorHook v4
+ * RebootInterceptorHook v5
  *
- * Intercepts ShutdownThread.rebootOrShutdown for plain reboots and
- * delegates to /system/bin/reboot (KernelSU interceptor script)
- * which does stop && start internally.
- *
- * system_server runs as root so no su needed.
+ * Kills shutdownanim first, then calls /system/bin/reboot (KernelSU script).
+ * KernelSU script does stop && start && input keyevent 26 to wake screen.
  */
 public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
@@ -48,7 +45,7 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                             Log.i(TAG, "rebootOrShutdown: reboot=" + isReboot + " reason=" + reason);
                             XposedBridge.log(TAG + ": rebootOrShutdown: reboot=" + isReboot + " reason=" + reason);
 
-                            // Pass through: shutdown (power off)
+                            // Pass through: power off
                             if (!isReboot) return;
 
                             // Pass through: recovery, bootloader, fastboot, etc.
@@ -56,16 +53,23 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                                     && !reason.equals("userrequested")) return;
 
                             // --- INTERCEPT plain reboot ---
-                            Log.w(TAG, "*** Intercepting reboot -> /system/bin/reboot ***");
+                            Log.w(TAG, "*** Intercepting reboot ***");
                             XposedBridge.log(TAG + ": *** INTERCEPTED ***");
 
                             param.setResult(null); // cancel the real reboot
 
                             new Thread(() -> {
                                 try {
+                                    // Kill shutdown animation before it gets stuck
+                                    XposedBridge.log(TAG + ": killing shutdownanim");
+                                    exec("/system/bin/stop", "shutdownanim");
+                                    Thread.sleep(300);
+
+                                    // Call KernelSU interceptor script (does stop && start && wake screen)
                                     XposedBridge.log(TAG + ": calling /system/bin/reboot");
                                     exec("/system/bin/reboot");
                                     XposedBridge.log(TAG + ": /system/bin/reboot returned");
+
                                 } catch (Exception e) {
                                     Log.e(TAG, "Error: " + e.getMessage());
                                     XposedBridge.log(TAG + ": Error: " + e.getMessage());
