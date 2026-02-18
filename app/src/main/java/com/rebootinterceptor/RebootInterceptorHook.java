@@ -9,12 +9,13 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * RebootInterceptorHook v3
+ * RebootInterceptorHook v4
  *
- * Fix: system_server has no PATH to su. Use full binary paths instead.
- * system_server already runs as root so no su needed.
+ * Intercepts ShutdownThread.rebootOrShutdown for plain reboots and
+ * delegates to /system/bin/reboot (KernelSU interceptor script)
+ * which does stop && start internally.
  *
- * Also kills shutdownanim which was left running and blocking the screen.
+ * system_server runs as root so no su needed.
  */
 public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
@@ -47,37 +48,24 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                             Log.i(TAG, "rebootOrShutdown: reboot=" + isReboot + " reason=" + reason);
                             XposedBridge.log(TAG + ": rebootOrShutdown: reboot=" + isReboot + " reason=" + reason);
 
-                            // Only intercept plain reboots - pass through shutdown/recovery/bootloader
+                            // Pass through: shutdown (power off)
                             if (!isReboot) return;
+
+                            // Pass through: recovery, bootloader, fastboot, etc.
                             if (reason != null && !reason.isEmpty()
                                     && !reason.equals("userrequested")) return;
 
-                            // --- INTERCEPT ---
-                            Log.w(TAG, "*** Intercepting reboot -> stop && start ***");
+                            // --- INTERCEPT plain reboot ---
+                            Log.w(TAG, "*** Intercepting reboot -> /system/bin/reboot ***");
                             XposedBridge.log(TAG + ": *** INTERCEPTED ***");
 
                             param.setResult(null); // cancel the real reboot
 
                             new Thread(() -> {
                                 try {
-                                    // Kill the shutdown animation that's blocking the screen
-                                    Log.i(TAG, "Killing shutdownanim...");
-                                    exec("/system/bin/stop", "shutdownanim");
-                                    Thread.sleep(500);
-
-                                    // Stop all Android services
-                                    // system_server is already root - no su needed
-                                    Log.i(TAG, "Running: stop");
-                                    exec("/system/bin/stop");
-                                    Thread.sleep(2000);
-
-                                    // Restart all Android services
-                                    Log.i(TAG, "Running: start");
-                                    exec("/system/bin/start");
-
-                                    Log.i(TAG, "stop && start completed successfully");
-                                    XposedBridge.log(TAG + ": stop && start done");
-
+                                    XposedBridge.log(TAG + ": calling /system/bin/reboot");
+                                    exec("/system/bin/reboot");
+                                    XposedBridge.log(TAG + ": /system/bin/reboot returned");
                                 } catch (Exception e) {
                                     Log.e(TAG, "Error: " + e.getMessage());
                                     XposedBridge.log(TAG + ": Error: " + e.getMessage());
