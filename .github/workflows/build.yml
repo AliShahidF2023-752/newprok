@@ -5,7 +5,6 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  # Allow manual trigger from GitHub Actions UI
   workflow_dispatch:
 
 jobs:
@@ -42,10 +41,36 @@ jobs:
       - name: Build release APK
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Rename APK
+      - name: Sign APK
+        run: |
+          keytool -genkeypair -v \
+            -keystore keystore.jks \
+            -alias reboot-interceptor \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=RebootInterceptor, O=Android, C=US"
+
+          BUILD_TOOLS=$ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)
+          echo "Using build-tools: $BUILD_TOOLS"
+
+          $BUILD_TOOLS/apksigner sign \
+            --ks keystore.jks \
+            --ks-key-alias reboot-interceptor \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out app/build/outputs/apk/release/app-release-signed.apk \
+            app/build/outputs/apk/release/app-release-unsigned.apk
+
+          $BUILD_TOOLS/apksigner verify app/build/outputs/apk/release/app-release-signed.apk
+          echo "APK signed successfully"
+
+      - name: Collect APK
         run: |
           mkdir -p out
-          cp app/build/outputs/apk/release/*.apk out/RebootInterceptor.apk
+          cp app/build/outputs/apk/release/app-release-signed.apk out/RebootInterceptor.apk
           echo "APK size: $(du -sh out/RebootInterceptor.apk)"
 
       - name: Upload APK artifact
