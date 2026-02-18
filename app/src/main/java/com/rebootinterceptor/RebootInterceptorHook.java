@@ -9,22 +9,8 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * RebootInterceptorHook v7
- *
- * Root cause of stuck boot logo (previous version):
- *   - Hook was intercepting reason=null/empty (internal watchdog/OTA reboots)
- *     and triggering "stop && start" during boot → stuck on logo forever.
- *
- * Root cause of reboot not working (previous version):
- *   - ProcessBuilder("/system/bin/reboot") ran in system_server process context
- *     where KSU bind-mount is hidden by susfs → hit real binary, not KSU script.
- *   - Fix: spawn "su -c /system/bin/reboot userrequested" so command runs in
- *     a fresh root shell where KSU mounts ARE visible.
- *
- * Strict guard:
- *   - ONLY intercept reason == "userrequested"  (power menu Restart tap)
- *   - null / empty                              → internal reboot, pass through
- *   - recovery / bootloader / fastboot etc.     → pass through
+ * RebootInterceptorHook v8 — DEBUG / heavily logged build.
+ * Every step logs to both Log.x (visible in adb logcat) and XposedBridge.log.
  */
 public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
@@ -32,26 +18,27 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
+        // Log every package so we can confirm system_server is seen
+        Log.d(TAG, "[handleLoadPackage] pkg=" + lpparam.packageName);
+
         if (!"android".equals(lpparam.packageName)) return;
-        XposedBridge.log(TAG + ": loaded in system_server");
+
+        Log.i(TAG, "[STEP 1] Loaded inside system_server — installing hooks");
+        XposedBridge.log(TAG + ": [STEP 1] Loaded inside system_server");
+
         hookShutdownThread(lpparam.classLoader);
     }
 
     private void hookShutdownThread(ClassLoader classLoader) {
+
+        // ── PRIMARY: ShutdownThread.reboot(Context, String, boolean) ─────────
         try {
             Class<?> shutdownThread = XposedHelpers.findClass(
                     "com.android.server.power.ShutdownThread", classLoader);
 
-            // ----------------------------------------------------------------
-            // PRIMARY HOOK: ShutdownThread.reboot(Context, String, boolean)
-            //
-            // This is the very first call made when user taps Restart in the
-            // power menu ActionsDialog. Cancelling here means:
-            //   - No shutdown broadcast sent
-            //   - No shutdown animation started
-            //   - No modem/radio teardown
-            //   - No 10-second wait loops
-            // ----------------------------------------------------------------
+            Log.i(TAG, "[STEP 2] ShutdownThread class found: " + shutdownThread);
+            XposedBridge.log(TAG + ": [STEP 2] ShutdownThread class found");
+
             XposedHelpers.findAndHookMethod(
                     shutdownThread,
                     "reboot",
@@ -64,58 +51,112 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                             String  reason  = (String)  param.args[1];
                             boolean confirm = (boolean) param.args[2];
 
-                            XposedBridge.log(TAG + ": reboot() reason='" + reason
-                                    + "' confirm=" + confirm);
+                            Log.i(TAG, "[STEP 3] reboot() called — reason='" + reason + "' confirm=" + confirm);
+                            XposedBridge.log(TAG + ": [STEP 3] reboot() called — reason='" + reason + "' confirm=" + confirm);
 
-                            // STRICT guard — only intercept explicit power menu restart.
-                            // null or empty = watchdog / OTA / internal → must NOT intercept.
                             if (!"userrequested".equals(reason)) {
-                                XposedBridge.log(TAG + ": passing through (reason not userrequested)");
+                                Log.i(TAG, "[STEP 3] NOT userrequested — passing through untouched");
+                                XposedBridge.log(TAG + ": [STEP 3] passing through (reason='" + reason + "')");
                                 return;
                             }
 
-                            XposedBridge.log(TAG + ": *** INTERCEPTED — suppressing ShutdownThread ***");
+                            Log.w(TAG, "[STEP 4] INTERCEPTED — cancelling ShutdownThread");
+                            XposedBridge.log(TAG + ": [STEP 4] INTERCEPTED — cancelling ShutdownThread");
 
-                            // Cancel the entire ShutdownThread — nothing else runs.
                             param.setResult(null);
+                            Log.i(TAG, "[STEP 5] setResult(null) done — ShutdownThread cancelled");
+                            XposedBridge.log(TAG + ": [STEP 5] setResult(null) done");
 
                             new Thread(() -> {
                                 try {
-                                    // Brief grace so UI thread can return cleanly first.
+                                    Log.i(TAG, "[STEP 6] Worker thread started");
+                                    XposedBridge.log(TAG + ": [STEP 6] Worker thread started");
+
+                                    Log.i(TAG, "[STEP 7] Sleeping 300ms for UI thread to return...");
+                                    XposedBridge.log(TAG + ": [STEP 7] Sleeping 300ms");
                                     Thread.sleep(300);
 
-                                    // Must use "su -c" to spawn a fresh root shell.
-                                    // system_server's own process context has susfs hiding
-                                    // the KSU bind-mount, so calling the binary directly
-                                    // would hit the real reboot, not your KSU script.
-                                    XposedBridge.log(TAG + ": spawning: su -c /system/bin/reboot userrequested");
-                                    execSu("/system/bin/reboot", "userrequested");
+                                    Log.i(TAG, "[STEP 8] Sleep done — about to spawn su -c");
+                                    XposedBridge.log(TAG + ": [STEP 8] Sleep done");
+
+                                    // Check if su is accessible
+                                    java.io.File suFile = new java.io.File("/system/bin/su");
+                                    Log.i(TAG, "[STEP 9] /system/bin/su exists=" + suFile.exists());
+                                    XposedBridge.log(TAG + ": [STEP 9] /system/bin/su exists=" + suFile.exists());
+
+                                    java.io.File rebootFile = new java.io.File("/system/bin/reboot");
+                                    Log.i(TAG, "[STEP 9b] /system/bin/reboot exists=" + rebootFile.exists()
+                                            + " length=" + rebootFile.length());
+                                    XposedBridge.log(TAG + ": [STEP 9b] /system/bin/reboot exists="
+                                            + rebootFile.exists() + " length=" + rebootFile.length());
+
+                                    Log.i(TAG, "[STEP 10] Calling: su -c /system/bin/reboot userrequested");
+                                    XposedBridge.log(TAG + ": [STEP 10] Calling: su -c /system/bin/reboot userrequested");
+
+                                    Process p = new ProcessBuilder("su", "-c", "/system/bin/reboot userrequested")
+                                            .redirectErrorStream(true)
+                                            .start();
+
+                                    Log.i(TAG, "[STEP 11] Process spawned, pid=" + p.toString());
+                                    XposedBridge.log(TAG + ": [STEP 11] Process spawned");
+
+                                    // Read output from the script for debugging
+                                    java.io.BufferedReader reader = new java.io.BufferedReader(
+                                            new java.io.InputStreamReader(p.getInputStream()));
+                                    String line;
+                                    while ((line = reader.readLine()) != null) {
+                                        Log.i(TAG, "[STEP 12] script output: " + line);
+                                        XposedBridge.log(TAG + ": [STEP 12] script: " + line);
+                                    }
+
+                                    // Wait max 10 seconds — if script ran stop/start we'll be killed
+                                    // before this, but if something went wrong we'll see the exit code
+                                    boolean finished = false;
+                                    for (int i = 0; i < 10; i++) {
+                                        Thread.sleep(1000);
+                                        Log.i(TAG, "[STEP 13] still alive after " + (i + 1) + "s...");
+                                        XposedBridge.log(TAG + ": [STEP 13] still alive after " + (i + 1) + "s");
+                                        try {
+                                            int exit = p.exitValue();
+                                            Log.w(TAG, "[STEP 14] su process exited with code=" + exit);
+                                            XposedBridge.log(TAG + ": [STEP 14] su exited code=" + exit);
+                                            finished = true;
+                                            break;
+                                        } catch (IllegalThreadStateException e) {
+                                            // still running — expected while stop/start is in progress
+                                        }
+                                    }
+
+                                    if (!finished) {
+                                        Log.w(TAG, "[STEP 15] su process still running after 10s — script may have hung");
+                                        XposedBridge.log(TAG + ": [STEP 15] su still running after 10s");
+                                    }
 
                                 } catch (Exception e) {
-                                    XposedBridge.log(TAG + ": exec error: " + e.getMessage());
-                                    Log.e(TAG, "exec error: " + e.getMessage());
+                                    Log.e(TAG, "[ERROR] Exception in worker: " + e.getClass().getName()
+                                            + ": " + e.getMessage());
+                                    XposedBridge.log(TAG + ": [ERROR] " + e.getClass().getName()
+                                            + ": " + e.getMessage());
+                                    e.printStackTrace();
                                 }
                             }, "RebootInterceptor-Thread").start();
                         }
                     }
             );
 
-            XposedBridge.log(TAG + ": PRIMARY hook installed on ShutdownThread.reboot()");
+            Log.i(TAG, "[STEP 2b] PRIMARY hook installed on ShutdownThread.reboot()");
+            XposedBridge.log(TAG + ": [STEP 2b] PRIMARY hook installed");
 
         } catch (Throwable primary) {
-            // ROM has a different ShutdownThread.reboot() signature — fall back.
-            XposedBridge.log(TAG + ": Primary hook failed (" + primary.getMessage()
-                    + ") — installing fallback on rebootOrShutdown");
+            Log.e(TAG, "[STEP 2 FAILED] Primary hook failed: " + primary.getMessage());
+            XposedBridge.log(TAG + ": [STEP 2 FAILED] " + primary.getMessage());
             hookFallback(classLoader);
         }
     }
 
-    // -----------------------------------------------------------------------
-    // FALLBACK: rebootOrShutdown(Context, boolean, String)
-    // Only reached if the ROM's ShutdownThread.reboot() signature differs.
-    // Fires later (after shutdown broadcast + animation start) but still works.
-    // -----------------------------------------------------------------------
     private void hookFallback(ClassLoader classLoader) {
+        Log.i(TAG, "[FALLBACK] Installing rebootOrShutdown hook");
+        XposedBridge.log(TAG + ": [FALLBACK] Installing rebootOrShutdown hook");
         try {
             Class<?> shutdownThread = XposedHelpers.findClass(
                     "com.android.server.power.ShutdownThread", classLoader);
@@ -132,59 +173,71 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                             boolean isReboot = (boolean) param.args[1];
                             String  reason   = (String)  param.args[2];
 
-                            XposedBridge.log(TAG + ": [fallback] rebootOrShutdown()"
-                                    + " isReboot=" + isReboot + " reason='" + reason + "'");
+                            Log.i(TAG, "[FALLBACK STEP 3] rebootOrShutdown() isReboot=" + isReboot
+                                    + " reason='" + reason + "'");
+                            XposedBridge.log(TAG + ": [FALLBACK STEP 3] isReboot=" + isReboot
+                                    + " reason='" + reason + "'");
 
-                            // Always let power-off through.
                             if (!isReboot) return;
 
-                            // STRICT: only intercept userrequested.
                             if (!"userrequested".equals(reason)) {
-                                XposedBridge.log(TAG + ": [fallback] passing through");
+                                Log.i(TAG, "[FALLBACK] passing through reason='" + reason + "'");
+                                XposedBridge.log(TAG + ": [FALLBACK] passing through");
                                 return;
                             }
 
-                            XposedBridge.log(TAG + ": [fallback] *** INTERCEPTED ***");
+                            Log.w(TAG, "[FALLBACK STEP 4] INTERCEPTED");
+                            XposedBridge.log(TAG + ": [FALLBACK STEP 4] INTERCEPTED");
                             param.setResult(null);
 
                             new Thread(() -> {
                                 try {
                                     Thread.sleep(300);
-                                    XposedBridge.log(TAG + ": [fallback] spawning: su -c /system/bin/reboot userrequested");
-                                    execSu("/system/bin/reboot", "userrequested");
+                                    Log.i(TAG, "[FALLBACK STEP 5] spawning su -c reboot");
+                                    XposedBridge.log(TAG + ": [FALLBACK STEP 5] spawning su -c");
+
+                                    Process p = new ProcessBuilder("su", "-c", "/system/bin/reboot userrequested")
+                                            .redirectErrorStream(true)
+                                            .start();
+
+                                    Log.i(TAG, "[FALLBACK STEP 6] spawned");
+                                    XposedBridge.log(TAG + ": [FALLBACK STEP 6] spawned");
+
+                                    java.io.BufferedReader reader = new java.io.BufferedReader(
+                                            new java.io.InputStreamReader(p.getInputStream()));
+                                    String line;
+                                    while ((line = reader.readLine()) != null) {
+                                        Log.i(TAG, "[FALLBACK] script: " + line);
+                                        XposedBridge.log(TAG + ": [FALLBACK] script: " + line);
+                                    }
+
+                                    for (int i = 0; i < 10; i++) {
+                                        Thread.sleep(1000);
+                                        Log.i(TAG, "[FALLBACK] still alive after " + (i + 1) + "s");
+                                        XposedBridge.log(TAG + ": [FALLBACK] alive " + (i + 1) + "s");
+                                        try {
+                                            int exit = p.exitValue();
+                                            Log.w(TAG, "[FALLBACK] su exited code=" + exit);
+                                            XposedBridge.log(TAG + ": [FALLBACK] su exited=" + exit);
+                                            break;
+                                        } catch (IllegalThreadStateException e) { /* still running */ }
+                                    }
+
                                 } catch (Exception e) {
-                                    XposedBridge.log(TAG + ": [fallback] error: " + e.getMessage());
+                                    Log.e(TAG, "[FALLBACK ERROR] " + e.getMessage());
+                                    XposedBridge.log(TAG + ": [FALLBACK ERROR] " + e.getMessage());
                                 }
                             }, "RebootInterceptor-Fallback").start();
                         }
                     }
             );
 
-            XposedBridge.log(TAG + ": FALLBACK hook installed on ShutdownThread.rebootOrShutdown");
+            Log.i(TAG, "[FALLBACK] hook installed on rebootOrShutdown");
+            XposedBridge.log(TAG + ": [FALLBACK] hook installed");
 
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Fallback hook also failed: " + t.getMessage());
-            Log.e(TAG, "Fallback hook also failed: " + t.getMessage());
+            Log.e(TAG, "[FALLBACK FAILED] " + t.getMessage());
+            XposedBridge.log(TAG + ": [FALLBACK FAILED] " + t.getMessage());
         }
-    }
-
-    /**
-     * Spawns "su -c <cmd>" in a new root shell where KSU bind-mounts are
-     * visible. Does NOT call waitFor() — the KSU script runs "stop" which
-     * tears down the process tree anyway, so waitFor() would deadlock.
-     */
-    private void execSu(String... cmd) throws Exception {
-        StringBuilder sb = new StringBuilder();
-        for (String part : cmd) {
-            if (sb.length() > 0) sb.append(' ');
-            sb.append(part);
-        }
-        String fullCmd = sb.toString();
-        XposedBridge.log(TAG + ": su -c \"" + fullCmd + "\"");
-
-        new ProcessBuilder("su", "-c", fullCmd)
-                .redirectErrorStream(true)
-                .start();
-        // No waitFor() — "stop" kills us before the script ever returns.
     }
 }
