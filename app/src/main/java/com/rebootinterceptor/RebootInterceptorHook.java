@@ -9,10 +9,23 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * RebootInterceptorHook v5
+ * RebootInterceptorHook v6
  *
- * Kills shutdownanim first, then calls /system/bin/reboot (KernelSU script).
- * KernelSU script does stop && start && input keyevent 26 to wake screen.
+ * Hooks ShutdownThread.reboot() — the EARLIEST entry point called when the
+ * user taps Restart in the power menu. This fires BEFORE any shutdown
+ * broadcast, shutdown animation, modem teardown, or 10-second waits.
+ *
+ * On intercept: immediately execs /system/bin/reboot and suppresses
+ * everything else ShutdownThread would have done.
+ *
+ * Trace-confirmed flow:
+ *   ActionsDialog tap (23:06:02.195)
+ *     → IPowerManager.reboot("userrequested")
+ *       → PowerManagerService.reboot()
+ *         → ShutdownThread.reboot()        ← WE HOOK HERE
+ *           → ShutdownThread.run()
+ *             → [shutdown broadcast, animation, modem teardown ...]
+ *               → rebootOrShutdown()       ← old hook was too late
  */
 public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
@@ -21,11 +34,92 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
         if (!"android".equals(lpparam.packageName)) return;
-        XposedBridge.log(TAG + ": installed in system_server");
+        XposedBridge.log(TAG + ": loaded in system_server");
         hookShutdownThread(lpparam.classLoader);
     }
 
     private void hookShutdownThread(ClassLoader classLoader) {
+        try {
+            Class<?> shutdownThread = XposedHelpers.findClass(
+                    "com.android.server.power.ShutdownThread", classLoader);
+
+            // ----------------------------------------------------------------
+            // PRIMARY HOOK: ShutdownThread.reboot(Context, String, boolean)
+            //
+            // This is the very first method called when a reboot is requested.
+            // Signature (AOSP Android 13):
+            //   public static void reboot(Context context, String reason, boolean confirm)
+            //
+            // We intercept here so ZERO shutdown side-effects run at all.
+            // ----------------------------------------------------------------
+            XposedHelpers.findAndHookMethod(
+                    shutdownThread,
+                    "reboot",
+                    android.content.Context.class,
+                    String.class,
+                    boolean.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            String reason  = (String)  param.args[1];
+                            boolean confirm = (boolean) param.args[2];
+
+                            Log.i(TAG, "ShutdownThread.reboot() reason=" + reason + " confirm=" + confirm);
+                            XposedBridge.log(TAG + ": ShutdownThread.reboot() reason=" + reason + " confirm=" + confirm);
+
+                            // Only intercept plain user-initiated restart.
+                            // Let recovery / bootloader / fastboot / safemode through untouched.
+                            if (reason != null
+                                    && !reason.isEmpty()
+                                    && !reason.equals("userrequested")) {
+                                XposedBridge.log(TAG + ": passing through (reason=" + reason + ")");
+                                return;
+                            }
+
+                            // --- INTERCEPT ---
+                            Log.w(TAG, "*** Intercepting reboot (suppressing ShutdownThread) ***");
+                            XposedBridge.log(TAG + ": *** INTERCEPTED — calling /system/bin/reboot directly ***");
+
+                            // Cancel ShutdownThread entirely — no broadcast, no animation,
+                            // no modem teardown, no 10-second waits.
+                            param.setResult(null);
+
+                            new Thread(() -> {
+                                try {
+                                    // Small grace period so the UI thread can return cleanly.
+                                    Thread.sleep(200);
+
+                                    XposedBridge.log(TAG + ": exec /system/bin/reboot");
+                                    exec("/system/bin/reboot");
+
+                                    // Should never reach here — kernel reboots the device.
+                                    XposedBridge.log(TAG + ": /system/bin/reboot returned unexpectedly");
+
+                                } catch (Exception e) {
+                                    Log.e(TAG, "exec error: " + e.getMessage());
+                                    XposedBridge.log(TAG + ": exec error: " + e.getMessage());
+                                }
+                            }, "RebootInterceptor-Thread").start();
+                        }
+                    }
+            );
+
+            XposedBridge.log(TAG + ": Hook installed on ShutdownThread.reboot()");
+
+        } catch (Throwable t) {
+            // If the primary hook fails (e.g., method signature differs on this ROM),
+            // fall back to the later rebootOrShutdown hook so we still catch it.
+            XposedBridge.log(TAG + ": Primary hook failed (" + t.getMessage() + "), installing fallback on rebootOrShutdown");
+            Log.w(TAG, "Primary hook failed, falling back: " + t.getMessage());
+            hookRebootOrShutdownFallback(classLoader);
+        }
+    }
+
+    // --------------------------------------------------------------------
+    // FALLBACK HOOK: rebootOrShutdown — fires later but still works.
+    // Only reached if the ROM's ShutdownThread.reboot() signature differs.
+    // --------------------------------------------------------------------
+    private void hookRebootOrShutdownFallback(ClassLoader classLoader) {
         try {
             Class<?> shutdownThread = XposedHelpers.findClass(
                     "com.android.server.power.ShutdownThread", classLoader);
@@ -40,50 +134,40 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                             boolean isReboot = (boolean) param.args[1];
-                            String reason   = (String)  param.args[2];
+                            String reason    = (String)  param.args[2];
 
-                            Log.i(TAG, "rebootOrShutdown: reboot=" + isReboot + " reason=" + reason);
-                            XposedBridge.log(TAG + ": rebootOrShutdown: reboot=" + isReboot + " reason=" + reason);
+                            Log.i(TAG, "[fallback] rebootOrShutdown: reboot=" + isReboot + " reason=" + reason);
+                            XposedBridge.log(TAG + ": [fallback] rebootOrShutdown: reboot=" + isReboot + " reason=" + reason);
 
-                            // Pass through: power off
-                            if (!isReboot) return;
+                            if (!isReboot) return; // let power-off through
 
-                            // Pass through: recovery, bootloader, fastboot, etc.
                             if (reason != null && !reason.isEmpty()
                                     && !reason.equals("userrequested")) return;
 
-                            // --- INTERCEPT plain reboot ---
-                            Log.w(TAG, "*** Intercepting reboot ***");
-                            XposedBridge.log(TAG + ": *** INTERCEPTED ***");
+                            Log.w(TAG, "[fallback] *** Intercepting rebootOrShutdown ***");
+                            XposedBridge.log(TAG + ": [fallback] *** INTERCEPTED ***");
 
-                            param.setResult(null); // cancel the real reboot
+                            param.setResult(null);
 
                             new Thread(() -> {
                                 try {
-                                    // Kill shutdown animation before it gets stuck
-                                    XposedBridge.log(TAG + ": killing shutdownanim");
-                                    exec("/system/bin/stop", "shutdownanim");
-                                    Thread.sleep(300);
-
-                                    // Call KernelSU interceptor script (does stop && start && wake screen)
-                                    XposedBridge.log(TAG + ": calling /system/bin/reboot");
+                                    Thread.sleep(200);
+                                    XposedBridge.log(TAG + ": [fallback] exec /system/bin/reboot");
                                     exec("/system/bin/reboot");
-                                    XposedBridge.log(TAG + ": /system/bin/reboot returned");
-
                                 } catch (Exception e) {
-                                    Log.e(TAG, "Error: " + e.getMessage());
-                                    XposedBridge.log(TAG + ": Error: " + e.getMessage());
+                                    Log.e(TAG, "[fallback] exec error: " + e.getMessage());
+                                    XposedBridge.log(TAG + ": [fallback] exec error: " + e.getMessage());
                                 }
-                            }, "RebootInterceptor-Thread").start();
+                            }, "RebootInterceptor-Fallback").start();
                         }
                     }
             );
 
-            XposedBridge.log(TAG + ": Hook installed on ShutdownThread.rebootOrShutdown");
+            XposedBridge.log(TAG + ": Fallback hook installed on ShutdownThread.rebootOrShutdown");
 
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Hook failed: " + t.getMessage());
-            Log.e(TAG, "Hook failed: " + t.getMessage());
+            Log.e(TAG, "Fallback hook also failed: " + t.getMessage());
+            XposedBridge.log(TAG + ": Fallback hook also failed: " + t.getMessage());
         }
     }
 
@@ -92,6 +176,6 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
         pb.redirectErrorStream(true);
         Process p = pb.start();
         p.waitFor();
-        Log.i(TAG, "exec " + String.join(" ", cmd) + " -> exit " + p.exitValue());
+        Log.i(TAG, "exec [" + String.join(" ", cmd) + "] exit=" + p.exitValue());
     }
 }
