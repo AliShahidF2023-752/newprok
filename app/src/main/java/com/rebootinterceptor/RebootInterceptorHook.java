@@ -7,9 +7,9 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
-public class RebootInterceptorHook implements IXposedHookLoadPackage {
+public class ShutdownInterceptorHook implements IXposedHookLoadPackage {
 
-    private static final String TAG = "RebootInterceptor";
+    private static final String TAG = "ShutdownInterceptor";
 
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) {
@@ -18,55 +18,60 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
         if (!"android".equals(lpparam.packageName)) return;
 
         XposedBridge.log(TAG + ": Loaded in system_server");
-        Log.i(TAG, "Loaded in system_server");
+        Log.i(TAG, TAG + ": Loaded in system_server");
 
         try {
-            // Hook SystemProperties.set(String key, String value)
-            Class<?> spClass = XposedHelpers.findClass("android.os.SystemProperties", lpparam.classLoader);
+            // Find ShutdownThread class
+            Class<?> shutdownThreadClass = XposedHelpers.findClass(
+                    "com.android.server.power.ShutdownThread",
+                    lpparam.classLoader
+            );
 
+            // Hook shutdownInner() method
             XposedHelpers.findAndHookMethod(
-                    spClass,
-                    "set",
-                    String.class,
-                    String.class,
+                    shutdownThreadClass,
+                    "shutdownInner",
+                    boolean.class,  // reboot
+                    String.class,   // reason
+                    boolean.class,  // wait
                     new XC_MethodHook() {
-
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            String key = (String) param.args[0];
-                            String value = (String) param.args[1];
+                            boolean reboot = (Boolean) param.args[0];
+                            String reason = (String) param.args[1];
 
-                            if ("sys.powerctl".equals(key)) {
-                                XposedBridge.log(TAG + ": sys.powerctl intercepted! value=" + value);
-                                Log.w(TAG, "sys.powerctl intercepted! value=" + value);
+                            XposedBridge.log(TAG + ": Intercepted shutdownInner! reboot=" + reboot + ", reason=" + reason);
+                            Log.i(TAG, TAG + ": Intercepted shutdownInner! reboot=" + reboot + ", reason=" + reason);
 
-                                // Cancel the real reboot
-                                param.setResult(null);
+                            // Cancel full shutdown
+                            param.setResult(null);
 
-                                // Run true soft reboot using stop; start
-                                new Thread(() -> {
-                                    try {
-                                        Runtime.getRuntime().exec(new String[]{
-                                                "/system/bin/su",
-                                                "-c",
-                                                "stop; start"
-                                        });
-                                    } catch (Exception e) {
-                                        Log.e(TAG, "Soft restart failed: " + e.getMessage());
-                                        XposedBridge.log(TAG + ": Soft restart failed: " + e.getMessage());
-                                    }
-                                }, "RebootInterceptorThread").start();
-                            }
+                            // Perform fast soft reboot via zygote restart
+                            new Thread(() -> {
+                                try {
+                                    XposedBridge.log(TAG + ": Performing soft reboot via zygote...");
+                                    Log.i(TAG, TAG + ": Performing soft reboot via zygote...");
+
+                                    Runtime.getRuntime().exec(new String[]{
+                                            "/system/bin/su",
+                                            "-c",
+                                            "setprop ctl.restart zygote"
+                                    });
+                                } catch (Exception e) {
+                                    XposedBridge.log(TAG + ": Soft reboot failed: " + e.getMessage());
+                                    Log.e(TAG, TAG + ": Soft reboot failed: " + e.getMessage());
+                                }
+                            }, "ShutdownInterceptorThread").start();
                         }
                     }
             );
 
-            XposedBridge.log(TAG + ": sys.powerctl hook installed");
-            Log.i(TAG, "sys.powerctl hook installed");
+            XposedBridge.log(TAG + ": shutdownInner() hook installed successfully");
+            Log.i(TAG, TAG + ": shutdownInner() hook installed successfully");
 
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": sys.powerctl hook failed: " + t);
-            Log.e(TAG, "sys.powerctl hook failed: " + t);
+            XposedBridge.log(TAG + ": Failed to hook shutdownInner(): " + t);
+            Log.e(TAG, TAG + ": Failed to hook shutdownInner(): " + t);
         }
     }
 }
