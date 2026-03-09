@@ -7,7 +7,7 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
-public class ShutdownInterceptorHook implements IXposedHookLoadPackage {
+public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
     private static final String TAG = "ShutdownInterceptor";
 
@@ -31,12 +31,14 @@ public class ShutdownInterceptorHook implements IXposedHookLoadPackage {
             XposedHelpers.findAndHookMethod(
                     shutdownThreadClass,
                     "shutdownInner",
-                    boolean.class,  // reboot
-                    String.class,   // reason
-                    boolean.class,  // wait
+                    boolean.class,
+                    String.class,
+                    boolean.class,
                     new XC_MethodHook() {
+
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+
                             boolean reboot = (Boolean) param.args[0];
                             String reason = (String) param.args[1];
 
@@ -47,31 +49,36 @@ public class ShutdownInterceptorHook implements IXposedHookLoadPackage {
                             param.setResult(null);
 
                             // Perform fast soft reboot via zygote restart
-                            new Thread(() -> {
-                                try {
-                                    XposedBridge.log(TAG + ": Performing soft reboot via zygote...");
-                                    Log.i(TAG, TAG + ": Performing soft reboot via zygote...");
+                            new Thread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    try {
 
-                                    Runtime.getRuntime().exec(new String[]{
-                                            "/system/bin/su",
-                                            "-c",
-                                            "setprop ctl.restart zygote"
-                                    });
-                                } catch (Exception e) {
-                                    XposedBridge.log(TAG + ": Soft reboot failed: " + e.getMessage());
-                                    Log.e(TAG, TAG + ": Soft reboot failed: " + e.getMessage());
+                                        XposedBridge.log(TAG + ": Performing soft reboot via zygote...");
+                                        Log.i(TAG, TAG + ": Performing soft reboot via zygote...");
+
+                                        Runtime.getRuntime().exec(new String[]{
+                                                "su",
+                                                "-c",
+                                                "setprop ctl.restart zygote"
+                                        });
+
+                                    } catch (Exception e) {
+                                        XposedBridge.log(TAG + ": Soft reboot failed: " + e.getMessage());
+                                        Log.e(TAG, TAG + ": Soft reboot failed: " + e.getMessage());
+                                    }
                                 }
-                            }, "ShutdownInterceptorThread").start();
+                            }).start();
                         }
                     }
             );
 
             XposedBridge.log(TAG + ": shutdownInner() hook installed successfully");
-            Log.i(TAG, TAG + ": shutdownInner() hook installed successfully");
+            Log.i(TAG + ": shutdownInner() hook installed successfully");
 
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": Failed to hook shutdownInner(): " + t);
-            Log.e(TAG, TAG + ": Failed to hook shutdownInner(): " + t);
+            Log.e(TAG + ": Failed to hook shutdownInner(): " + t);
         }
     }
 }
