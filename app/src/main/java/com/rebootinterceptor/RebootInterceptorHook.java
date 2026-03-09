@@ -2,17 +2,17 @@ package com.rebootinterceptor;
 
 import android.util.Log;
 import de.robv.android.xposed.IXposedHookLoadPackage;
+import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
 
 public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
     private static final String TAG = "RebootInterceptor";
 
     @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
+    public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) {
 
         // Only hook system_server
         if (!"android".equals(lpparam.packageName)) return;
@@ -21,7 +21,7 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
         Log.i(TAG, "Loaded in system_server");
 
         try {
-            // Hook the low-level __system_property_set function in libc
+            // Hook SystemProperties.set(String key, String value)
             Class<?> spClass = XposedHelpers.findClass("android.os.SystemProperties", lpparam.classLoader);
 
             XposedHelpers.findAndHookMethod(
@@ -40,16 +40,16 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                                 XposedBridge.log(TAG + ": sys.powerctl intercepted! value=" + value);
                                 Log.w(TAG, "sys.powerctl intercepted! value=" + value);
 
-                                // Cancel actual write to sys.powerctl (stop real reboot)
+                                // Cancel the real reboot
                                 param.setResult(null);
 
-                                // Do soft restart instead
+                                // Run true soft reboot using stop; start
                                 new Thread(() -> {
                                     try {
                                         Runtime.getRuntime().exec(new String[]{
                                                 "/system/bin/su",
                                                 "-c",
-                                                "setprop ctl.restart zygote"
+                                                "stop; start"
                                         });
                                     } catch (Exception e) {
                                         Log.e(TAG, "Soft restart failed: " + e.getMessage());
@@ -58,7 +58,8 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                                 }, "RebootInterceptorThread").start();
                             }
                         }
-                    });
+                    }
+            );
 
             XposedBridge.log(TAG + ": sys.powerctl hook installed");
             Log.i(TAG, "sys.powerctl hook installed");
