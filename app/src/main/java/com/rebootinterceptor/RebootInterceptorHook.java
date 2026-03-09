@@ -1,6 +1,5 @@
 package com.rebootinterceptor;
 
-import android.util.Log;
 import java.lang.reflect.Method;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
@@ -18,8 +17,6 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
         if (!"android".equals(lpparam.packageName))
             return;
 
-        XposedBridge.log(TAG + ": Loaded in system_server");
-
         try {
 
             Class<?> shutdownThreadClass =
@@ -27,13 +24,9 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                             "com.android.server.power.ShutdownThread"
                     );
 
-            XposedBridge.log(TAG + ": ShutdownThread loaded");
-
             for (Method method : shutdownThreadClass.getDeclaredMethods()) {
 
                 String name = method.getName();
-
-                XposedBridge.log(TAG + ": Found method -> " + name);
 
                 if (!name.toLowerCase().contains("shutdown")
                         && !name.toLowerCase().contains("reboot"))
@@ -45,62 +38,99 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                     protected void beforeHookedMethod(MethodHookParam param)
                             throws Throwable {
 
-                        String reason = null;
-
-                        for (Object arg : param.args) {
-                            if (arg instanceof String) {
-                                reason = (String) arg;
-                            }
-                        }
-
-                        XposedBridge.log(TAG +
-                                ": Intercepted " +
-                                param.method.getName() +
-                                " reason=" + reason);
-
-                        if (reason != null &&
-                                !reason.contains("user") &&
-                                !reason.contains("global"))
-                            return;
-
                         param.setResult(null);
 
-                        softReboot();
+                        fakeReboot();
                     }
                 });
 
-                XposedBridge.log(TAG +
-                        ": Hook installed on ShutdownThread." + name);
             }
 
         } catch (Throwable t) {
 
-            XposedBridge.log(TAG + ": Failed to hook ShutdownThread: " + t);
-
+            XposedBridge.log(TAG + ": Hook failed: " + t);
         }
     }
 
-    private void softReboot() {
+    private void fakeReboot() {
 
         new Thread(() -> {
 
             try {
 
-                Runtime.getRuntime().exec(
-                        "setprop ctl.restart zygote"
-                );
+                XposedBridge.log(TAG + ": Starting fake reboot");
 
-                Runtime.getRuntime().exec(
-                        "setprop ctl.restart zygote_secondary"
-                );
+                // stop SystemUI
+                Runtime.getRuntime().exec("setprop ctl.stop com.android.systemui");
 
-                XposedBridge.log(TAG + ": Soft reboot executed");
+                Thread.sleep(500);
+
+                // disable input devices
+                Runtime.getRuntime().exec(new String[]{
+                        "sh","-c",
+                        "for i in /sys/class/input/input*/enabled; do echo 0 > $i; done"
+                });
+
+                // play shutdown sound
+                Runtime.getRuntime().exec(new String[]{
+                        "sh","-c",
+                        "cmd media_session play /system/media/audio/ui/Shutdown.ogg"
+                });
+
+                // 1️⃣ screen black
+                Runtime.getRuntime().exec("input keyevent 26");
+
+                Thread.sleep(1000);
+
+                // 2️⃣ boot logo
+                Runtime.getRuntime().exec("setprop service.bootanim.exit 0");
+
+                // 3️⃣ shutdown animation
+                Runtime.getRuntime().exec("setprop ctl.start bootanim");
+
+                Thread.sleep(5000);
+
+                // 4️⃣ black screen
+                Runtime.getRuntime().exec("setprop ctl.stop bootanim");
+
+                Thread.sleep(5000);
+
+                // 5️⃣ vibration
+                Runtime.getRuntime().exec("cmd vibrator vibrate 200");
+
+                Thread.sleep(500);
+
+                // 6️⃣ boot logo again
+                Runtime.getRuntime().exec("setprop service.bootanim.exit 0");
+
+                // 7️⃣ boot animation
+                Runtime.getRuntime().exec("setprop ctl.start bootanim");
+
+                Thread.sleep(10000);
+
+                Runtime.getRuntime().exec("setprop ctl.stop bootanim");
+
+                Thread.sleep(1000);
+
+                // re-enable input devices
+                Runtime.getRuntime().exec(new String[]{
+                        "sh","-c",
+                        "for i in /sys/class/input/input*/enabled; do echo 1 > $i; done"
+                });
+
+                // restart SystemUI
+                Runtime.getRuntime().exec("setprop ctl.start com.android.systemui");
+
+                Thread.sleep(2000);
+
+                // 8️⃣ wake screen
+                Runtime.getRuntime().exec("input keyevent 26");
+
+                XposedBridge.log(TAG + ": Fake reboot finished");
 
             } catch (Throwable e) {
 
-                XposedBridge.log(TAG +
-                        ": Soft reboot failed " + e);
-
+                XposedBridge.log(TAG + ": Fake reboot error: " + e);
             }
 
         }).start();
