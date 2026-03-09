@@ -8,195 +8,165 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
-/**
- * RebootInterceptorHook v9
+/*
+ * RebootInterceptor
  *
- * Root cause: Nubia's power menu lives in SystemUI process (com.android.systemui).
- * When user swipes Restart:
- *   NubiaSlideView → ShutdownOrRebootListener.reboot()
- *   → GlobalActionsDialogLite.CallBackShutdownReboot.rebooting()
- *   → mWindowManagerFuncs.reboot(false)          [Binder call to WMS in system_server]
+ * Converts power menu reboot into a soft restart (userspace restart)
+ * by intercepting system reboot calls and executing:
  *
- * Hooking ShutdownThread.reboot() in system_server was wrong process.
- * Instead we hook PowerManager.reboot(String) in com.android.systemui — intercepts
- * the call before it ever crosses the Binder boundary to WMS/ShutdownThread.
+ *      setprop ctl.restart zygote
  *
- * Secondary hook: GlobalActionsDialogLite$CallBackShutdownReboot.rebooting() in case
- * Nubia bypasses PowerManager.
+ * This avoids:
+ *  - kernel reboot
+ *  - bootloader
+ *  - boot animation
+ *
+ * Result:
+ * SystemUI + Android framework restart instantly.
  */
+
 public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
     private static final String TAG = "RebootInterceptor";
 
     @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
-        Log.d(TAG, "[handleLoadPackage] pkg=" + lpparam.packageName);
+    public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) {
 
-        // ── Hook inside SystemUI ────────────────────────────────────────────
-        if ("com.android.systemui".equals(lpparam.packageName)) {
-            Log.i(TAG, "[SYSUI] Loaded in SystemUI — installing hooks");
-            XposedBridge.log(TAG + ": [SYSUI] Loaded in SystemUI");
-
-            hookPowerManagerInSysui(lpparam.classLoader);
-            hookCallBackShutdownReboot(lpparam.classLoader);
+        if (!"android".equals(lpparam.packageName)) {
+            return;
         }
 
-        // ── Keep system_server hook as last-resort fallback ─────────────────
-        if ("android".equals(lpparam.packageName)) {
-            Log.i(TAG, "[SERVER] Loaded in system_server — installing fallback hook");
-            XposedBridge.log(TAG + ": [SERVER] Loaded in system_server");
-            hookShutdownThreadFallback(lpparam.classLoader);
-        }
+        XposedBridge.log(TAG + ": Loaded in system_server");
+        Log.i(TAG, "Loaded in system_server");
+
+        hookWindowManagerService(lpparam.classLoader);
+        hookShutdownThread(lpparam.classLoader);
     }
 
-    // ── PRIMARY: PowerManager.reboot(String) in SystemUI process ──────────
-    private void hookPowerManagerInSysui(ClassLoader cl) {
+
+    /*
+     * PRIMARY HOOK
+     * Most power menus call WindowManagerService.reboot()
+     */
+
+    private void hookWindowManagerService(ClassLoader classLoader) {
+
         try {
-            Class<?> pmClass = XposedHelpers.findClass("android.os.PowerManager", cl);
-            Log.i(TAG, "[PM] PowerManager class found");
-            XposedBridge.log(TAG + ": [PM] PowerManager class found");
 
-            XposedHelpers.findAndHookMethod(pmClass, "reboot", String.class, new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    String reason = (String) param.args[0];
-                    Log.i(TAG, "[PM] PowerManager.reboot() called, reason='" + reason + "'");
-                    XposedBridge.log(TAG + ": [PM] PowerManager.reboot() reason='" + reason + "'");
+            Class<?> wms = XposedHelpers.findClass(
+                    "com.android.server.wm.WindowManagerService",
+                    classLoader
+            );
 
-                    // Only intercept explicit user restart; pass through null/shutdown/recovery etc.
-                    if (!"userrequested".equals(reason) && reason != null) {
-                        Log.i(TAG, "[PM] passing through, reason='" + reason + "'");
-                        XposedBridge.log(TAG + ": [PM] passing through");
-                        return;
-                    }
-                    // Also intercept null reason when coming from SystemUI reboot path
-                    // (mWindowManagerFuncs.reboot(false) may pass null)
-
-                    Log.w(TAG, "[PM] *** INTERCEPTED PowerManager.reboot() — suppressing ***");
-                    XposedBridge.log(TAG + ": [PM] *** INTERCEPTED ***");
-                    param.setResult(null);
-                    spawnReboot("[PM]");
-                }
-            });
-
-            Log.i(TAG, "[PM] PowerManager.reboot hook installed");
-            XposedBridge.log(TAG + ": [PM] hook installed");
-
-        } catch (Throwable t) {
-            Log.e(TAG, "[PM] hook failed: " + t.getMessage());
-            XposedBridge.log(TAG + ": [PM] hook failed: " + t.getMessage());
-        }
-    }
-
-    // ── SECONDARY: GlobalActionsDialogLite$CallBackShutdownReboot.rebooting() ──
-    private void hookCallBackShutdownReboot(ClassLoader cl) {
-        try {
-            // Inner class name uses $ separator
-            Class<?> cbClass = XposedHelpers.findClass(
-                    "com.android.systemui.globalactions.GlobalActionsDialogLite$CallBackShutdownReboot", cl);
-
-            Log.i(TAG, "[CB] CallBackShutdownReboot class found");
-            XposedBridge.log(TAG + ": [CB] CallBackShutdownReboot class found");
-
-            XposedHelpers.findAndHookMethod(cbClass, "rebooting", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    Log.w(TAG, "[CB] *** INTERCEPTED CallBackShutdownReboot.rebooting() ***");
-                    XposedBridge.log(TAG + ": [CB] *** INTERCEPTED rebooting() ***");
-                    param.setResult(null);
-                    spawnReboot("[CB]");
-                }
-            });
-
-            Log.i(TAG, "[CB] rebooting() hook installed");
-            XposedBridge.log(TAG + ": [CB] rebooting() hook installed");
-
-        } catch (Throwable t) {
-            Log.e(TAG, "[CB] hook failed: " + t.getMessage());
-            XposedBridge.log(TAG + ": [CB] hook failed: " + t.getMessage());
-        }
-    }
-
-    // ── FALLBACK: ShutdownThread.reboot() in system_server ────────────────
-    private void hookShutdownThreadFallback(ClassLoader cl) {
-        try {
-            Class<?> st = XposedHelpers.findClass(
-                    "com.android.server.power.ShutdownThread", cl);
-
-            XposedHelpers.findAndHookMethod(st, "reboot",
-                    android.content.Context.class, String.class, boolean.class,
+            XposedHelpers.findAndHookMethod(
+                    wms,
+                    "reboot",
+                    boolean.class,
                     new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            String reason = (String) param.args[1];
-                            Log.i(TAG, "[ST] ShutdownThread.reboot() reason='" + reason + "'");
-                            XposedBridge.log(TAG + ": [ST] ShutdownThread.reboot() reason='" + reason + "'");
 
-                            if (!"userrequested".equals(reason)) {
-                                Log.i(TAG, "[ST] passing through");
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+
+                            Log.w(TAG, "WindowManagerService reboot intercepted");
+                            XposedBridge.log(TAG + ": WMS reboot intercepted");
+
+                            param.setResult(null);
+
+                            performSoftRestart("WMS");
+                        }
+                    }
+            );
+
+            Log.i(TAG, "WMS hook installed");
+            XposedBridge.log(TAG + ": WMS hook installed");
+
+        } catch (Throwable t) {
+
+            Log.e(TAG, "WMS hook failed: " + t);
+            XposedBridge.log(TAG + ": WMS hook failed: " + t);
+        }
+    }
+
+
+    /*
+     * FALLBACK HOOK
+     * Some ROMs call ShutdownThread directly
+     */
+
+    private void hookShutdownThread(ClassLoader classLoader) {
+
+        try {
+
+            Class<?> shutdownThread = XposedHelpers.findClass(
+                    "com.android.server.power.ShutdownThread",
+                    classLoader
+            );
+
+            XposedHelpers.findAndHookMethod(
+                    shutdownThread,
+                    "reboot",
+                    android.content.Context.class,
+                    String.class,
+                    boolean.class,
+                    new XC_MethodHook() {
+
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+
+                            String reason = (String) param.args[1];
+
+                            Log.w(TAG, "ShutdownThread reboot intercepted reason=" + reason);
+                            XposedBridge.log(TAG + ": ShutdownThread reboot intercepted");
+
+                            if ("recovery".equals(reason) || "bootloader".equals(reason)) {
                                 return;
                             }
 
-                            Log.w(TAG, "[ST] *** INTERCEPTED ShutdownThread.reboot() ***");
-                            XposedBridge.log(TAG + ": [ST] *** INTERCEPTED ***");
                             param.setResult(null);
-                            spawnReboot("[ST]");
-                        }
-                    });
 
-            Log.i(TAG, "[ST] ShutdownThread fallback hook installed");
-            XposedBridge.log(TAG + ": [ST] ShutdownThread fallback hook installed");
+                            performSoftRestart("ShutdownThread");
+                        }
+                    }
+            );
+
+            Log.i(TAG, "ShutdownThread fallback hook installed");
+            XposedBridge.log(TAG + ": ShutdownThread fallback hook installed");
 
         } catch (Throwable t) {
-            Log.e(TAG, "[ST] fallback hook failed: " + t.getMessage());
-            XposedBridge.log(TAG + ": [ST] fallback hook failed: " + t.getMessage());
+
+            Log.e(TAG, "ShutdownThread hook failed: " + t);
+            XposedBridge.log(TAG + ": ShutdownThread hook failed: " + t);
         }
     }
 
-    // ── Shared: spawn KSU reboot script ───────────────────────────────────
-    private void spawnReboot(String source) {
+
+    /*
+     * Executes the soft restart
+     */
+
+    private void performSoftRestart(String source) {
+
         new Thread(() -> {
+
             try {
-                Log.i(TAG, source + " worker thread started, sleeping 300ms");
-                XposedBridge.log(TAG + ": " + source + " worker started");
-                Thread.sleep(300);
 
-                Log.i(TAG, source + " spawning: su -c /system/bin/reboot userrequested");
-                XposedBridge.log(TAG + ": " + source + " spawning su -c");
+                Log.i(TAG, source + ": executing soft restart");
+                XposedBridge.log(TAG + ": executing soft restart");
 
-                Process p = new ProcessBuilder("su", "-c", "/system/bin/reboot userrequested")
-                        .redirectErrorStream(true)
-                        .start();
+                Thread.sleep(200);
 
-                Log.i(TAG, source + " process spawned");
-                XposedBridge.log(TAG + ": " + source + " spawned");
+                Runtime.getRuntime().exec(new String[]{
+                        "/system/bin/su",
+                        "-c",
+                        "setprop ctl.restart zygote"
+                });
 
-                // Drain output (KSU script may print something useful)
-                java.io.BufferedReader br = new java.io.BufferedReader(
-                        new java.io.InputStreamReader(p.getInputStream()));
-                String line;
-                while ((line = br.readLine()) != null) {
-                    Log.i(TAG, source + " script: " + line);
-                    XposedBridge.log(TAG + ": " + source + " script: " + line);
-                }
+            } catch (Throwable t) {
 
-                // Poll exit — if stop/start kills us we'll never reach here
-                for (int i = 0; i < 15; i++) {
-                    Thread.sleep(1000);
-                    Log.i(TAG, source + " alive after " + (i + 1) + "s");
-                    XposedBridge.log(TAG + ": " + source + " alive " + (i + 1) + "s");
-                    try {
-                        int exit = p.exitValue();
-                        Log.w(TAG, source + " su exited code=" + exit);
-                        XposedBridge.log(TAG + ": " + source + " su exit=" + exit);
-                        break;
-                    } catch (IllegalThreadStateException ignored) { }
-                }
-
-            } catch (Exception e) {
-                Log.e(TAG, source + " error: " + e.getClass().getName() + ": " + e.getMessage());
-                XposedBridge.log(TAG + ": " + source + " error: " + e.getMessage());
+                Log.e(TAG, source + ": restart failed " + t);
+                XposedBridge.log(TAG + ": restart failed " + t);
             }
-        }, "RebootInterceptor-Worker").start();
+
+        }, "RebootInterceptorThread").start();
     }
 }
