@@ -14,20 +14,18 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) {
 
-        // Only hook system_server
         if (!"android".equals(lpparam.packageName)) return;
 
         XposedBridge.log(TAG + ": Loaded in system_server");
         Log.i(TAG, "Loaded in system_server");
 
         try {
-            // Find ShutdownThread class
             Class<?> shutdownThreadClass = XposedHelpers.findClass(
                     "com.android.server.power.ShutdownThread",
                     lpparam.classLoader
             );
 
-            // Hook shutdownInner() method
+            // Hook the method very early: completely skip it
             XposedHelpers.findAndHookMethod(
                     shutdownThreadClass,
                     "shutdownInner",
@@ -44,15 +42,16 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                             XposedBridge.log(TAG + ": Intercepted shutdownInner! reboot=" + reboot + ", reason=" + reason);
                             Log.i(TAG, "Intercepted shutdownInner! reboot=" + reboot + ", reason=" + reason);
 
-                            // Cancel full shutdown
+                            // Prevent the original shutdownInner() from running at all
                             param.setResult(null);
 
-                            // Perform fast soft reboot via zygote restart
+                            // Immediately trigger soft reboot via zygote restart
                             new Thread(() -> {
                                 try {
                                     XposedBridge.log(TAG + ": Performing soft reboot via zygote...");
                                     Log.i(TAG, "Performing soft reboot via zygote...");
 
+                                    // This ensures a quick soft reboot instead of full shutdown
                                     Runtime.getRuntime().exec(new String[]{
                                             "su",
                                             "-c",
@@ -62,7 +61,7 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                                     XposedBridge.log(TAG + ": Soft reboot failed: " + e.getMessage());
                                     Log.e(TAG, "Soft reboot failed", e);
                                 }
-                            }, "ShutdownInterceptorThread").start();
+                            }, "SoftRebootThread").start();
                         }
                     }
             );
