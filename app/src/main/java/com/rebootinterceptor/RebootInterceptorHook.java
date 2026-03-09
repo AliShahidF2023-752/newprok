@@ -1,6 +1,7 @@
 package com.rebootinterceptor;
 
 import android.util.Log;
+
 import java.lang.reflect.Method;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
@@ -16,130 +17,98 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) {
 
+        // Only hook system server
         if (!"android".equals(lpparam.packageName)) return;
 
         XposedBridge.log(TAG + ": Loaded in system_server");
-        Log.i(TAG, "Loaded in system_server");
-
-        hookShutdownThread(lpparam);
-        hookPowerManager(lpparam);
-    }
-
-    // ----------------------------
-    // ShutdownThread hooks
-    // ----------------------------
-
-    private void hookShutdownThread(XC_LoadPackage.LoadPackageParam lpparam) {
+        Log.i(TAG, TAG + ": Loaded in system_server");
 
         try {
-
-            Class<?> shutdownThread = XposedHelpers.findClass(
-                    "com.android.server.power.ShutdownThread",
-                    lpparam.classLoader
-            );
-
-            XposedBridge.log(TAG + ": Found ShutdownThread");
-
-            for (Method m : shutdownThread.getDeclaredMethods()) {
-
-                String name = m.getName().toLowerCase();
-
-                XposedBridge.log(TAG + ": ShutdownThread method -> " + name);
-
-                if (name.contains("shutdown")
-                        || name.contains("reboot")
-                        || name.contains("sequence")) {
-
-                    XposedBridge.hookMethod(m, shutdownHook(name));
-                    XposedBridge.log(TAG + ": Hooked ShutdownThread." + name);
-                }
-            }
-
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": ShutdownThread hook failed: " + t);
-        }
-    }
-
-    // ----------------------------
-    // PowerManagerService hooks
-    // ----------------------------
-
-    private void hookPowerManager(XC_LoadPackage.LoadPackageParam lpparam) {
-
-        try {
-
-            Class<?> pms = XposedHelpers.findClass(
+            // ---- Scan PowerManagerService ----
+            Class<?> pmsClass = XposedHelpers.findClass(
                     "com.android.server.power.PowerManagerService",
                     lpparam.classLoader
             );
 
-            XposedBridge.log(TAG + ": Found PowerManagerService");
+            // Candidate shutdown/reboot methods
+            String[] methods = new String[]{
+                    "shutdown",
+                    "shutdownLocked",
+                    "rebootOrShutdown",
+                    "rebootOrShutdownInternal",
+                    "shutdownInner"
+            };
 
-            for (Method m : pms.getDeclaredMethods()) {
+            for (String methodName : methods) {
+                try {
+                    XposedHelpers.findAndHookMethod(
+                            pmsClass,
+                            methodName,
+                            boolean.class,   // reboot
+                            String.class,    // reason
+                            boolean.class,   // wait
+                            new XC_MethodHook() {
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
 
-                String name = m.getName().toLowerCase();
+                                    // Extract reboot reason
+                                    String reason = null;
+                                    for (Object arg : param.args) {
+                                        if (arg instanceof String) {
+                                            reason = (String) arg;
+                                            break;
+                                        }
+                                    }
 
-                XposedBridge.log(TAG + ": PMS method -> " + name);
+                                    // Only intercept user/global requested reboots
+                                    if (reason == null || 
+                                        (!reason.toLowerCase().contains("user") && 
+                                         !reason.toLowerCase().contains("global"))) {
+                                        return;
+                                    }
 
-                if (name.contains("shutdown")
-                        || name.contains("reboot")) {
+                                    boolean reboot = (Boolean) param.args[0];
+                                    XposedBridge.log(TAG + ": Intercepted " + methodName +
+                                                     " reboot=" + reboot + " reason=" + reason);
+                                    Log.i(TAG, TAG + ": Intercepted " + methodName +
+                                          " reboot=" + reboot + " reason=" + reason);
 
-                    XposedBridge.hookMethod(m, shutdownHook(name));
-                    XposedBridge.log(TAG + ": Hooked PowerManagerService." + name);
+                                    // Cancel the original shutdown/reboot
+                                    param.setResult(null);
+
+                                    // Trigger soft reboot
+                                    softReboot();
+                                }
+                            }
+                    );
+
+                    XposedBridge.log(TAG + ": Hook installed for PowerManagerService." + methodName);
+
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + ": Method " + methodName + " not found: " + t);
                 }
             }
 
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": PowerManagerService hook failed: " + t);
+            XposedBridge.log(TAG + ": PowerManagerService class not found: " + t);
+            Log.e(TAG, TAG + ": PowerManagerService class not found: " + t);
         }
     }
 
-    // ----------------------------
-    // Main interceptor
-    // ----------------------------
-
-    private XC_MethodHook shutdownHook(final String methodName) {
-
-        return new XC_MethodHook() {
-
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-
-                XposedBridge.log(TAG + ": INTERCEPTED -> " + methodName);
-                Log.i(TAG, "Intercepted reboot/shutdown via " + methodName);
-
-                // Block original reboot
-                param.setResult(null);
-
-                // Trigger soft reboot
-                performSoftReboot();
-            }
-        };
-    }
-
-    // ----------------------------
-    // Soft reboot (zygote restart)
-    // ----------------------------
-
-    private void performSoftReboot() {
-
+    private void softReboot() {
         new Thread(() -> {
-
             try {
+                // Soft reboot without su
+                Runtime.getRuntime().exec("setprop ctl.restart zygote");
+                Runtime.getRuntime().exec("setprop ctl.restart zygote_secondary");
 
-                XposedBridge.log(TAG + ": Restarting zygote");
-
-                Runtime.getRuntime().exec(new String[]{
-                        "/system/bin/su",
-                        "-c",
-                        "setprop ctl.restart zygote"
-                });
+                XposedBridge.log(TAG + ": Soft reboot triggered");
+                Log.i(TAG, TAG + ": Soft reboot triggered");
 
             } catch (Throwable e) {
-
-                XposedBridge.log(TAG + ": Soft reboot failed " + e);
+                XposedBridge.log(TAG + ": Soft reboot failed: " + e);
+                Log.e(TAG, TAG + ": Soft reboot failed: " + e);
             }
-
-        }).start();
+        }, "RebootInterceptorThread").start();
     }
 }
