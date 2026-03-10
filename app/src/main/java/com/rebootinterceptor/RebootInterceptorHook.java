@@ -1,12 +1,10 @@
 package com.rebootinterceptor;
 
-import android.util.Log;
 import java.lang.reflect.Method;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 public class RebootInterceptorHook implements IXposedHookLoadPackage {
@@ -21,120 +19,170 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
         XposedBridge.log(TAG + ": Loaded in system_server");
 
+        hookShutdownThread(lpparam);
+        hookSystemProperties(lpparam);
+    }
+
+    private void hookShutdownThread(final XC_LoadPackage.LoadPackageParam lpparam) {
+
         try {
-            // 1️⃣ Hook ShutdownThread methods
-            Class<?> shutdownThread = lpparam.classLoader.loadClass(
-                    "com.android.server.power.ShutdownThread"
-            );
 
-            for (Method method : shutdownThread.getDeclaredMethods()) {
+            Class<?> shutdownThreadClass =
+                    lpparam.classLoader.loadClass(
+                            "com.android.server.power.ShutdownThread"
+                    );
+
+            XposedBridge.log(TAG + ": ShutdownThread loaded");
+
+            for (Method method : shutdownThreadClass.getDeclaredMethods()) {
+
                 String name = method.getName();
-                if (!name.toLowerCase().contains("shutdown") &&
-                    !name.toLowerCase().contains("reboot")) continue;
 
-                XposedHelpers.findAndHookMethod(
-                        shutdownThread,
-                        name,
-                        new XC_MethodHook() {
-                            @Override
-                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                String reason = null;
-                                for (Object arg : param.args) {
-                                    if (arg instanceof String) reason = (String) arg;
-                                }
-                                XposedBridge.log(TAG + ": Intercepted " + param.method.getName() +
-                                        " reason=" + reason);
+                XposedBridge.log(TAG + ": Found method -> " + name);
 
-                                // Only intercept normal user/global reboots
-                                if (reason != null &&
-                                        !reason.contains("user") &&
-                                        !reason.contains("global"))
-                                    return;
+                if (!name.toLowerCase().contains("shutdown")
+                        && !name.toLowerCase().contains("reboot"))
+                    continue;
 
-                                // Prevent actual reboot
-                                param.setResult(null);
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
 
-                                // Run fake reboot sequence
-                                fakeRebootSequence();
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param)
+                            throws Throwable {
+
+                        String reason = null;
+
+                        for (Object arg : param.args) {
+                            if (arg instanceof String) {
+                                reason = (String) arg;
                             }
                         }
-                );
+
+                        XposedBridge.log(TAG +
+                                ": Intercepted " +
+                                param.method.getName() +
+                                " reason=" + reason);
+
+                        if (reason != null &&
+                                !reason.contains("user") &&
+                                !reason.contains("global"))
+                            return;
+
+                        // stop real reboot
+                        param.setResult(null);
+
+                        fakeReboot();
+                    }
+                });
+
+                XposedBridge.log(TAG +
+                        ": Hook installed on ShutdownThread." + name);
             }
 
-            // 2️⃣ Block PowerManagerService.lowLevelReboot
-            Class<?> pms = lpparam.classLoader.loadClass(
-                    "com.android.server.power.PowerManagerService"
-            );
-
-            XposedHelpers.findAndHookMethod(
-                    pms,
-                    "lowLevelReboot",
-                    String.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            XposedBridge.log(TAG + ": lowLevelReboot BLOCKED");
-                            param.setResult(null);
-                        }
-                    }
-            );
-
-            // 3️⃣ Block sys.powerctl property changes (setprop)
-            XposedHelpers.findAndHookMethod(
-                    "android.os.SystemProperties",
-                    lpparam.classLoader,
-                    "set",
-                    String.class,
-                    String.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            String key = (String) param.args[0];
-                            if ("sys.powerctl".equals(key)) {
-                                XposedBridge.log(TAG + ": sys.powerctl change BLOCKED -> " + param.args[1]);
-                                param.setResult(null);
-                            }
-                        }
-                    }
-            );
-
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Hooking failed " + t);
+
+            XposedBridge.log(TAG +
+                    ": Failed to hook ShutdownThread: " + t);
         }
     }
 
-    private void fakeRebootSequence() {
+    private void hookSystemProperties(final XC_LoadPackage.LoadPackageParam lpparam) {
+
+        try {
+
+            Class<?> sp =
+                    lpparam.classLoader.loadClass(
+                            "android.os.SystemProperties"
+                    );
+
+            for (Method m : sp.getDeclaredMethods()) {
+
+                if (!m.getName().equals("set"))
+                    continue;
+
+                Class<?>[] params = m.getParameterTypes();
+
+                if (params.length != 2)
+                    continue;
+
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param)
+                            throws Throwable {
+
+                        String key = (String) param.args[0];
+
+                        if ("sys.powerctl".equals(key)) {
+
+                            XposedBridge.log(TAG +
+                                    ": BLOCKED sys.powerctl -> "
+                                    + param.args[1]);
+
+                            param.setResult(null);
+                        }
+                    }
+                });
+
+                XposedBridge.log(TAG + ": Hooked SystemProperties.set");
+            }
+
+        } catch (Throwable t) {
+
+            XposedBridge.log(TAG +
+                    ": Failed to hook SystemProperties: " + t);
+        }
+    }
+
+    private void fakeReboot() {
 
         new Thread(() -> {
-            try {
-                XposedBridge.log(TAG + ": Starting fake reboot sequence");
 
-                // 1️⃣ Screen black
-                Runtime.getRuntime().exec("service call window 18 i32 0"); // turn off screen
+            try {
+
+                XposedBridge.log(TAG + ": Starting fake reboot");
+
+                // screen black
+                Runtime.getRuntime().exec("input keyevent 26");
+
                 Thread.sleep(1000);
 
-                // 2️⃣ Shutdown animation (5s)
-                Runtime.getRuntime().exec("setprop ctl.start shutdownanimation");
-                Thread.sleep(5000);
-                Runtime.getRuntime().exec("setprop ctl.stop shutdownanimation");
+                // shutdown animation
+                Runtime.getRuntime().exec(
+                        "setprop service.bootanim.exit 0");
+                Runtime.getRuntime().exec(
+                        "setprop ctl.start shutdownanimation");
 
-                // 3️⃣ Black screen (5s)
                 Thread.sleep(5000);
 
-                // 4️⃣ Boot animation (10s)
-                Runtime.getRuntime().exec("setprop service.bootanim.exit 0");
-                Runtime.getRuntime().exec("setprop ctl.start bootanim");
+                Runtime.getRuntime().exec(
+                        "setprop ctl.stop shutdownanimation");
+
+                // black screen
+                Thread.sleep(5000);
+
+                // boot animation
+                Runtime.getRuntime().exec(
+                        "setprop service.bootanim.exit 0");
+                Runtime.getRuntime().exec(
+                        "setprop ctl.start bootanim");
+
                 Thread.sleep(10000);
-                Runtime.getRuntime().exec("setprop ctl.stop bootanim");
 
-                // 5️⃣ Turn screen on → lockscreen
-                Runtime.getRuntime().exec("service call window 18 i32 1"); // wake screen
+                Runtime.getRuntime().exec(
+                        "setprop ctl.stop bootanim");
 
-                XposedBridge.log(TAG + ": Fake reboot sequence completed");
+                // wake screen
+                Runtime.getRuntime().exec("input keyevent 26");
+
+                XposedBridge.log(TAG + ": Fake reboot complete");
 
             } catch (Throwable e) {
-                XposedBridge.log(TAG + ": Fake reboot failed " + e);
+
+                XposedBridge.log(TAG +
+                        ": Fake reboot failed " + e);
             }
+
         }).start();
     }
 }
