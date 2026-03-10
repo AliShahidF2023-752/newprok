@@ -81,7 +81,13 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
             try {
 
-                Runtime.getRuntime().exec("/system/bin/reboot userrequested");
+                ProcessBuilder pb = new ProcessBuilder(
+                        "/system/bin/sh",
+                        "-c",
+                        "/system/bin/reboot userrequested"
+                );
+
+                pb.start();
 
                 XposedBridge.log(TAG + ": Custom reboot script executed");
 
