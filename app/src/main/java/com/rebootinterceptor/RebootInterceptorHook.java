@@ -1,5 +1,13 @@
 package com.rebootinterceptor;
 
+import android.content.Context;
+import android.hardware.input.InputManager;
+import android.os.PowerManager;
+import android.os.SystemClock;
+import android.os.SystemProperties;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+
 import java.lang.reflect.Method;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
@@ -16,6 +24,8 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
         if (!"android".equals(lpparam.packageName))
             return;
+
+        XposedBridge.log(TAG + ": Loaded in system_server");
 
         try {
 
@@ -38,99 +48,96 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                     protected void beforeHookedMethod(MethodHookParam param)
                             throws Throwable {
 
+                        XposedBridge.log(TAG + ": Fake reboot triggered");
+
                         param.setResult(null);
 
-                        fakeReboot();
+                        Context context = (Context) XposedBridge
+                                .getObjectField(param.thisObject, "mContext");
+
+                        fakeReboot(context);
                     }
                 });
-
             }
 
         } catch (Throwable t) {
 
-            XposedBridge.log(TAG + ": Hook failed: " + t);
+            XposedBridge.log(TAG + ": Hook failed " + t);
         }
     }
 
-    private void fakeReboot() {
+    private void fakeReboot(Context context) {
 
         new Thread(() -> {
 
             try {
 
-                XposedBridge.log(TAG + ": Starting fake reboot");
+                PowerManager pm =
+                        (PowerManager) context.getSystemService(Context.POWER_SERVICE);
 
-                // stop SystemUI
-                Runtime.getRuntime().exec("setprop ctl.stop com.android.systemui");
+                Vibrator vibrator =
+                        (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
 
-                Thread.sleep(500);
+                InputManager inputManager = InputManager.getInstance();
 
-                // disable input devices
-                Runtime.getRuntime().exec(new String[]{
-                        "sh","-c",
-                        "for i in /sys/class/input/input*/enabled; do echo 0 > $i; done"
-                });
+                XposedBridge.log(TAG + ": Starting fake reboot sequence");
 
-                // play shutdown sound
-                Runtime.getRuntime().exec(new String[]{
-                        "sh","-c",
-                        "cmd media_session play /system/media/audio/ui/Shutdown.ogg"
-                });
+                // disable touch / gestures
+                inputManager.setInputDispatchMode(false, false);
 
-                // 1️⃣ screen black
-                Runtime.getRuntime().exec("input keyevent 26");
+                // 1️⃣ screen turns black
+                pm.goToSleep(SystemClock.uptimeMillis());
 
                 Thread.sleep(1000);
 
                 // 2️⃣ boot logo
-                Runtime.getRuntime().exec("setprop service.bootanim.exit 0");
+                SystemProperties.set("service.bootanim.exit", "0");
 
                 // 3️⃣ shutdown animation
-                Runtime.getRuntime().exec("setprop ctl.start bootanim");
+                SystemProperties.set("ctl.start", "bootanim");
 
                 Thread.sleep(5000);
 
                 // 4️⃣ black screen
-                Runtime.getRuntime().exec("setprop ctl.stop bootanim");
+                SystemProperties.set("ctl.stop", "bootanim");
 
                 Thread.sleep(5000);
 
                 // 5️⃣ vibration
-                Runtime.getRuntime().exec("cmd vibrator vibrate 200");
+                if (vibrator != null) {
+                    vibrator.vibrate(
+                            VibrationEffect.createOneShot(
+                                    200,
+                                    VibrationEffect.DEFAULT_AMPLITUDE
+                            )
+                    );
+                }
 
                 Thread.sleep(500);
 
                 // 6️⃣ boot logo again
-                Runtime.getRuntime().exec("setprop service.bootanim.exit 0");
+                SystemProperties.set("service.bootanim.exit", "0");
 
                 // 7️⃣ boot animation
-                Runtime.getRuntime().exec("setprop ctl.start bootanim");
+                SystemProperties.set("ctl.start", "bootanim");
 
                 Thread.sleep(10000);
 
-                Runtime.getRuntime().exec("setprop ctl.stop bootanim");
+                SystemProperties.set("ctl.stop", "bootanim");
 
-                Thread.sleep(1000);
+                Thread.sleep(500);
 
-                // re-enable input devices
-                Runtime.getRuntime().exec(new String[]{
-                        "sh","-c",
-                        "for i in /sys/class/input/input*/enabled; do echo 1 > $i; done"
-                });
-
-                // restart SystemUI
-                Runtime.getRuntime().exec("setprop ctl.start com.android.systemui");
-
-                Thread.sleep(2000);
+                // re-enable input
+                inputManager.setInputDispatchMode(true, false);
 
                 // 8️⃣ wake screen
-                Runtime.getRuntime().exec("input keyevent 26");
+                pm.wakeUp(SystemClock.uptimeMillis());
 
                 XposedBridge.log(TAG + ": Fake reboot finished");
 
             } catch (Throwable e) {
 
-                XposedBridge.log(TAG + ": Fake reboot error: " + e);
+                XposedBridge.log(TAG + ": Fake reboot error " + e);
             }
 
         }).start();
