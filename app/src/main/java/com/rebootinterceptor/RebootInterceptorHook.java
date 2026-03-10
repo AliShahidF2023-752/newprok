@@ -81,18 +81,27 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
             try {
 
-                Runtime.getRuntime().exec(new String[]{
-                    "/system/bin/sh",
-                    "-c",
-                    "/system/bin/reboot userrequested"
-                });
+                String moduleDir = "/data/adb/modules/rebootinterceptor";
+                File dir = new File(moduleDir);
 
-                XposedBridge.log(TAG + ": Custom reboot script executed");
+                if (!dir.exists()) {
+                    XposedBridge.log(TAG + ": module directory missing");
+                    return;
+                }
+
+                File flag = new File(dir, "reboot.flag");
+
+                if (!flag.exists()) {
+                    flag.createNewFile();
+                }
+
+                XposedBridge.log(TAG + ": reboot flag created");
 
             } catch (Throwable e) {
 
-                XposedBridge.log(TAG + ": Custom reboot failed " + e);
+                XposedBridge.log(TAG + ": failed to signal reboot service " + e);
             }
+
 
         }).start();
     }
