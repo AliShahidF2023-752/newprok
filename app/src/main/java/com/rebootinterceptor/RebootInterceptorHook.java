@@ -2,8 +2,6 @@ package com.rebootinterceptor;
 
 import android.content.Context;
 import android.os.SystemClock;
-import android.os.VibrationEffect;
-import android.os.Vibrator;
 
 import java.lang.reflect.Method;
 
@@ -23,24 +21,23 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
         if (!"android".equals(lpparam.packageName))
             return;
 
-        XposedBridge.log(TAG + ": Loaded");
+        XposedBridge.log(TAG + ": Loaded in system_server");
 
         try {
 
-            Class<?> shutdownThreadClass =
+            Class<?> shutdownThread =
                     lpparam.classLoader.loadClass(
                             "com.android.server.power.ShutdownThread"
                     );
 
-            for (Method method : shutdownThreadClass.getDeclaredMethods()) {
+            for (Method m : shutdownThread.getDeclaredMethods()) {
 
-                String name = method.getName();
+                String name = m.getName().toLowerCase();
 
-                if (!name.toLowerCase().contains("shutdown")
-                        && !name.toLowerCase().contains("reboot"))
+                if (!name.contains("shutdown") && !name.contains("reboot"))
                     continue;
 
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
 
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param)
@@ -63,7 +60,7 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
         } catch (Throwable t) {
 
-            XposedBridge.log(TAG + ": Hook failed " + t);
+            XposedBridge.log(TAG + ": Hook error " + t);
         }
     }
 
@@ -90,8 +87,6 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
             try {
 
-                XposedBridge.log(TAG + ": Starting sequence");
-
                 // 1️⃣ screen black
                 XposedHelpers.callMethod(
                         context.getSystemService(Context.POWER_SERVICE),
@@ -99,12 +94,11 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                         SystemClock.uptimeMillis()
                 );
 
+                // 2️⃣ wait 1 sec
                 Thread.sleep(1000);
 
-                // 2️⃣ boot logo
-                setProp("service.bootanim.exit", "0");
-
                 // 3️⃣ shutdown animation
+                setProp("service.bootanim.exit", "0");
                 setProp("ctl.start", "bootanim");
 
                 Thread.sleep(5000);
@@ -114,42 +108,21 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
                 Thread.sleep(5000);
 
-                // 5️⃣ vibration
-                Vibrator v =
-                        (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
-
-                if (v != null) {
-
-                    v.vibrate(
-                            VibrationEffect.createOneShot(
-                                    200,
-                                    VibrationEffect.DEFAULT_AMPLITUDE
-                            )
-                    );
-                }
-
-                Thread.sleep(500);
-
-                // 6️⃣ boot logo again
-                setProp("service.bootanim.exit", "0");
-
-                // 7️⃣ boot animation
+                // 5️⃣ boot animation
                 setProp("ctl.start", "bootanim");
 
                 Thread.sleep(10000);
 
                 setProp("ctl.stop", "bootanim");
 
-                Thread.sleep(500);
-
-                // 8️⃣ wake screen
+                // 6️⃣ wake screen
                 XposedHelpers.callMethod(
                         context.getSystemService(Context.POWER_SERVICE),
                         "wakeUp",
                         SystemClock.uptimeMillis()
                 );
 
-                XposedBridge.log(TAG + ": Sequence finished");
+                XposedBridge.log(TAG + ": Fake reboot finished");
 
             } catch (Throwable e) {
 
