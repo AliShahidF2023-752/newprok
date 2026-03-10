@@ -2,6 +2,9 @@ package com.rebootinterceptor;
 
 import java.lang.reflect.Method;
 
+import android.app.AndroidAppHelper;
+import android.os.SystemClock;
+
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -59,16 +62,16 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                         }
 
                         XposedBridge.log(TAG +
-                                ": Intercepted " +
-                                param.method.getName() +
-                                " reason=" + reason);
+                                ": Intercepted "
+                                + param.method.getName()
+                                + " reason=" + reason);
 
                         if (reason != null &&
                                 !reason.contains("user") &&
                                 !reason.contains("global"))
                             return;
 
-                        // stop real reboot
+                        // block real reboot
                         param.setResult(null);
 
                         fakeReboot();
@@ -100,9 +103,7 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                 if (!m.getName().equals("set"))
                     continue;
 
-                Class<?>[] params = m.getParameterTypes();
-
-                if (params.length != 2)
+                if (m.getParameterTypes().length != 2)
                     continue;
 
                 XposedBridge.hookMethod(m, new XC_MethodHook() {
@@ -142,40 +143,69 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
                 XposedBridge.log(TAG + ": Starting fake reboot");
 
+                Object context =
+                        AndroidAppHelper.currentApplication();
+
+                Object pm =
+                        context.getClass()
+                                .getMethod("getSystemService", String.class)
+                                .invoke(context, "power");
+
+                Method goToSleep =
+                        pm.getClass().getMethod(
+                                "goToSleep",
+                                long.class
+                        );
+
+                Method wakeUp =
+                        pm.getClass().getMethod(
+                                "wakeUp",
+                                long.class
+                        );
+
                 // screen black
-                Runtime.getRuntime().exec("input keyevent 26");
+                goToSleep.invoke(pm, SystemClock.uptimeMillis());
 
                 Thread.sleep(1000);
 
                 // shutdown animation
                 Runtime.getRuntime().exec(
-                        "setprop service.bootanim.exit 0");
+                        "setprop service.bootanim.exit 0"
+                );
+
                 Runtime.getRuntime().exec(
-                        "setprop ctl.start shutdownanimation");
+                        "setprop ctl.start shutdownanimation"
+                );
 
                 Thread.sleep(5000);
 
                 Runtime.getRuntime().exec(
-                        "setprop ctl.stop shutdownanimation");
+                        "setprop ctl.stop shutdownanimation"
+                );
 
                 // black screen
                 Thread.sleep(5000);
 
                 // boot animation
                 Runtime.getRuntime().exec(
-                        "setprop service.bootanim.exit 0");
+                        "setprop service.bootanim.exit 0"
+                );
+
                 Runtime.getRuntime().exec(
-                        "setprop ctl.start bootanim");
+                        "setprop ctl.start bootanim"
+                );
 
                 Thread.sleep(10000);
 
                 Runtime.getRuntime().exec(
-                        "setprop ctl.stop bootanim");
+                        "setprop ctl.stop bootanim"
+                );
 
                 // wake screen
-                Runtime.getRuntime().exec("input keyevent 26");
+                wakeUp.invoke(pm, SystemClock.uptimeMillis());
 
-                XposedBridge.log(TAG + ": Fake reboot complete");
+                XposedBridge.log(TAG +
+                        ": Fake reboot complete");
 
             } catch (Throwable e) {
 
