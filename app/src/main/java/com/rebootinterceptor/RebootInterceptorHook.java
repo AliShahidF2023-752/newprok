@@ -77,29 +77,25 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
     private void softReboot() {
 
+        if (triggered) return;
+        triggered = true;
+
         new Thread(() -> {
 
             try {
 
-                String moduleDir = "/data/adb/modules/rebootinterceptor";
-                File dir = new File(moduleDir);
+                // signal root service using system property
+                Runtime.getRuntime().exec(new String[]{
+                        "/system/bin/setprop",
+                        "sys.reboot.interceptor",
+                        "1"
+                });
 
-                if (!dir.exists()) {
-                    XposedBridge.log(TAG + ": module directory missing");
-                    return;
-                }
-
-                File flag = new File(dir, "reboot.flag");
-
-                if (!flag.exists()) {
-                    flag.createNewFile();
-                }
-
-                XposedBridge.log(TAG + ": reboot flag created");
+                XposedBridge.log(TAG + ": reboot property set");
 
             } catch (Throwable e) {
 
-                XposedBridge.log(TAG + ": failed to signal reboot service " + e);
+                XposedBridge.log(TAG + ": failed to set reboot property " + e);
             }
 
 
