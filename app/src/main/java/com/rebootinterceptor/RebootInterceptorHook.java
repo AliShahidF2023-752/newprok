@@ -72,19 +72,16 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
         triggered = true;
 
         new Thread(() -> {
-            try {
-                Class<?> systemProperties = Class.forName("android.os.SystemProperties");
-                Method set = systemProperties.getMethod("set", String.class, String.class);
-                set.invoke(null, PROP, "1");
-                XposedBridge.log(TAG + ": Property set — fake reboot triggered");
-            } catch (Throwable e) {
-                XposedBridge.log(TAG + ": Failed to set property: " + e);
-            } finally {
-                // Always reset — system_server stays alive between fake reboots
-                // so without this, triggered stays true forever and blocks
-                // every subsequent attempt after the first.
-                triggered = false;
-            }
-        }).start();
+        try {
+            Class<?> systemProperties = Class.forName("android.os.SystemProperties");
+            Method set = systemProperties.getMethod("set", String.class, String.class);
+            set.invoke(null, PROP, "1");
+            XposedBridge.log(TAG + ": Property set via SystemProperties API");
+        } catch (Throwable e) {
+            XposedBridge.log(TAG + ": Failed to set property: " + e);
+        } finally {
+            triggered = false; 
+        }
+    }).start();
     }
 }
