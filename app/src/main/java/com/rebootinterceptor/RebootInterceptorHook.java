@@ -1,6 +1,5 @@
 package com.rebootinterceptor;
 
-import android.util.Log;
 import java.lang.reflect.Method;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -46,8 +45,7 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                         XposedBridge.log(TAG + ": Intercepted " +
                                 param.method.getName() + " reason=" + reason);
 
-                        // Only intercept user-initiated reboots/shutdowns
-                        // Let recovery, bootloader, OTA etc. pass through
+                        // Pass through non-user reboots (recovery, OTA, bootloader, etc.)
                         if (reason != null &&
                             !reason.isEmpty() &&
                             !reason.equals("userrequested") &&
@@ -57,7 +55,7 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
                         // Block the real reboot
                         param.setResult(null);
-                        XposedBridge.log(TAG + ": Real reboot blocked, triggering soft reboot");
+                        XposedBridge.log(TAG + ": Real reboot blocked, triggering fake reboot");
                         softReboot();
                     }
                 });
@@ -75,20 +73,16 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
         new Thread(() -> {
             try {
-                // -------------------------------------------------------
-                // FIX: Do NOT use Runtime.getRuntime().exec("setprop ...")
-                // system_server is SELinux-sandboxed and cannot exec shell
-                // binaries. Instead, call SystemProperties.set() directly
-                // via reflection — system_server already has full property
-                // write permissions inside its own domain.
-                // -------------------------------------------------------
                 Class<?> systemProperties = Class.forName("android.os.SystemProperties");
                 Method set = systemProperties.getMethod("set", String.class, String.class);
                 set.invoke(null, PROP, "1");
-                XposedBridge.log(TAG + ": Property set via SystemProperties API");
+                XposedBridge.log(TAG + ": Property set — fake reboot triggered");
             } catch (Throwable e) {
                 XposedBridge.log(TAG + ": Failed to set property: " + e);
-                // Reset flag so a retry is possible if triggered again
+            } finally {
+                // Always reset — system_server stays alive between fake reboots
+                // so without this, triggered stays true forever and blocks
+                // every subsequent attempt after the first.
                 triggered = false;
             }
         }).start();
