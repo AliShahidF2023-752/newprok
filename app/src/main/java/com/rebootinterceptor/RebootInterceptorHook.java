@@ -25,25 +25,46 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
         try {
 
-            Class<?> shutdownThread =
+            Class<?> shutdownThreadClass =
                     lpparam.classLoader.loadClass(
                             "com.android.server.power.ShutdownThread"
                     );
 
-            for (Method m : shutdownThread.getDeclaredMethods()) {
+            XposedBridge.log(TAG + ": ShutdownThread loaded");
 
-                String name = m.getName().toLowerCase();
+            for (Method method : shutdownThreadClass.getDeclaredMethods()) {
 
-                if (!name.contains("shutdown") && !name.contains("reboot"))
+                String name = method.getName();
+
+                XposedBridge.log(TAG + ": Found method -> " + name);
+
+                if (!name.toLowerCase().contains("shutdown")
+                        && !name.toLowerCase().contains("reboot"))
                     continue;
 
-                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
 
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param)
                             throws Throwable {
 
-                        XposedBridge.log(TAG + ": Fake reboot triggered");
+                        String reason = null;
+
+                        for (Object arg : param.args) {
+                            if (arg instanceof String) {
+                                reason = (String) arg;
+                            }
+                        }
+
+                        XposedBridge.log(TAG +
+                                ": Intercepted " +
+                                param.method.getName() +
+                                " reason=" + reason);
+
+                        if (reason != null &&
+                                !reason.contains("user") &&
+                                !reason.contains("global"))
+                            return;
 
                         param.setResult(null);
 
@@ -56,11 +77,13 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
                     }
                 });
 
+                XposedBridge.log(TAG +
+                        ": Hook installed on ShutdownThread." + name);
             }
 
         } catch (Throwable t) {
 
-            XposedBridge.log(TAG + ": Hook error " + t);
+            XposedBridge.log(TAG + ": Failed to hook ShutdownThread: " + t);
         }
     }
 
@@ -87,42 +110,44 @@ public class RebootInterceptorHook implements IXposedHookLoadPackage {
 
             try {
 
-                // 1️⃣ screen black
+                XposedBridge.log(TAG + ": Starting fake reboot");
+
+                // screen black
                 XposedHelpers.callMethod(
                         context.getSystemService(Context.POWER_SERVICE),
                         "goToSleep",
                         SystemClock.uptimeMillis()
                 );
 
-                // 2️⃣ wait 1 sec
+                // wait 1 second
                 Thread.sleep(1000);
 
-                // 3️⃣ shutdown animation
+                // shutdown animation
                 setProp("service.bootanim.exit", "0");
                 setProp("ctl.start", "bootanim");
 
                 Thread.sleep(5000);
 
-                // 4️⃣ black screen
+                // black screen
                 setProp("ctl.stop", "bootanim");
 
                 Thread.sleep(5000);
 
-                // 5️⃣ boot animation
+                // boot animation
                 setProp("ctl.start", "bootanim");
 
                 Thread.sleep(10000);
 
                 setProp("ctl.stop", "bootanim");
 
-                // 6️⃣ wake screen
+                // wake screen
                 XposedHelpers.callMethod(
                         context.getSystemService(Context.POWER_SERVICE),
                         "wakeUp",
                         SystemClock.uptimeMillis()
                 );
 
-                XposedBridge.log(TAG + ": Fake reboot finished");
+                XposedBridge.log(TAG + ": Fake reboot complete");
 
             } catch (Throwable e) {
 
